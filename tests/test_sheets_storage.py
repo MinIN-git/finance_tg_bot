@@ -30,8 +30,11 @@ def a1_row(label):
 
 
 class FakeWorksheet:
+    _ids = iter(range(1, 1000))
+
     def __init__(self, title):
         self.title = title
+        self.id = next(self._ids)
         self.rows = []
 
     def get_all_values(self, **kwargs):
@@ -39,6 +42,10 @@ class FakeWorksheet:
 
     def append_row(self, values, value_input_option=None, table_range=None):
         self.rows.append([user_entered(v) for v in values])
+
+    def append_rows(self, values, value_input_option=None, table_range=None):
+        for row in values:
+            self.append_row(row)
 
     def update(self, values, range_name, value_input_option=None):
         start = a1_row(range_name)
@@ -76,6 +83,12 @@ class FakeSpreadsheet:
     def add_worksheet(self, title, rows, cols):
         self.sheets[title] = FakeWorksheet(title)
         return self.sheets[title]
+
+    def batch_update(self, body):
+        for req in body["requests"]:
+            rng = req["deleteDimension"]["range"]
+            ws = next(w for w in self.sheets.values() if w.id == rng["sheetId"])
+            del ws.rows[rng["startIndex"]:rng["endIndex"]]
 
 
 class FakeClient:
@@ -158,3 +171,17 @@ def test_manual_rows_with_strings(storage):
     ws.rows.append(["мусор"])
     ops = run(storage.list_operations())
     assert [(o.date, o.amount, o.type) for o in ops] == [(date(2026, 9, 1), Decimal("1200.50"), OpType.EXPENSE)]
+
+
+def test_batch_add_and_delete(storage):
+    ops = [Operation(date(2026, 9, 30), OpType.EXPENSE, Decimal(i + 1), "Досуг", "Карта", tags=["импорт"]) for i in range(5)]
+    run(storage.add_operations(ops))
+    assert run(storage.delete_operations([ops[1].id, ops[3].id])) == 2
+    storage._ops = None
+    assert [o.amount for o in run(storage.list_operations())] == [1, 3, 5]
+
+
+def test_read_grid(storage):
+    storage._sh.sheets["Лист1"].rows = [["Сентябрь", ""], ["Доходы", "Сумма"]]
+    formatted, raw = storage.read_grid("Лист1")
+    assert formatted[1] == ["Доходы", "Сумма"]

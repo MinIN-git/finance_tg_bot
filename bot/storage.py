@@ -49,6 +49,19 @@ class Storage(ABC):
     @abstractmethod
     async def delete_operation(self, op_id: str) -> Operation | None: ...
 
+    async def add_operations(self, ops: list[Operation]) -> None:
+        """Пакетное добавление (по умолчанию — по одной)."""
+        for op in ops:
+            await self.add_operation(op)
+
+    async def delete_operations(self, op_ids: list[str]) -> int:
+        """Пакетное удаление; возвращает число удаленных."""
+        deleted = 0
+        for op_id in op_ids:
+            if await self.delete_operation(op_id) is not None:
+                deleted += 1
+        return deleted
+
     @abstractmethod
     async def list_categories(self) -> list[Category]: ...
 
@@ -280,6 +293,49 @@ class SheetsStorage(Storage):
                 op_to_row(op), value_input_option="USER_ENTERED", table_range="A1",
             )
             ops.append(op)
+
+    async def add_operations(self, ops: list[Operation]) -> None:
+        if not ops:
+            return
+        async with self._lock:
+            cached = await self._ensure_ops()
+            await self._run(
+                self._ws(SHEET_OPERATIONS).append_rows,
+                [op_to_row(op) for op in ops], value_input_option="USER_ENTERED", table_range="A1",
+            )
+            cached.extend(ops)
+
+    async def delete_operations(self, op_ids: list[str]) -> int:
+        if not op_ids:
+            return 0
+        async with self._lock:
+            ws = self._ws(SHEET_OPERATIONS)
+            ids = await self._run(ws.col_values, 9)
+            wanted = set(op_ids)
+            rows = [i + 1 for i, v in enumerate(ids) if i > 0 and v in wanted]
+            if rows:
+                # снизу вверх, чтобы номера строк не сдвигались
+                requests = [
+                    {"deleteDimension": {"range": {
+                        "sheetId": ws.id, "dimension": "ROWS", "startIndex": r - 1, "endIndex": r,
+                    }}}
+                    for r in sorted(rows, reverse=True)
+                ]
+                await self._run(self._sh.batch_update, {"requests": requests})
+            self._ops = None
+            return len(rows)
+
+    def read_grid(self, title: str) -> tuple[list[list[Any]], list[list[Any]]]:
+        """Произвольный лист целиком: (отформатированные значения, «сырые» значения)."""
+        from gspread.utils import DateTimeOption, ValueRenderOption
+
+        ws = self._ws(title)
+        formatted = ws.get_all_values()
+        raw = ws.get_all_values(
+            value_render_option=ValueRenderOption.unformatted,
+            date_time_render_option=DateTimeOption.serial_number,
+        )
+        return formatted, raw
 
     def _find_row(self, op_id: str) -> int | None:
         ids = self._ws(SHEET_OPERATIONS).col_values(9)
