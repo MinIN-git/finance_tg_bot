@@ -1,0 +1,15 @@
+services:
+  bot:
+    build: .
+    container_name: finance-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GOOGLE_CREDENTIALS_FILE: /app/secrets/service_account.json
+    volumes:
+      - ./secrets:/app/secrets:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
