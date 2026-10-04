@@ -4,8 +4,8 @@
 и справа «Отчет» с «Доходы за месяц» / «Расходы за месяц». Месяц блока определяется по ближайшей
 сверху-слева ячейке с названием месяца («Сентябрь», «Сентябрь 2026», «01.09.2026», «09.2026»).
 
-На каждую непустую категорию месяца создается одна операция: дата — последний день месяца,
-счет «Карта», тег #импорт. Без --apply ничего не пишется (dry-run).
+На каждую категорию бота за месяц создается одна операция (старые категории, попавшие в одну
+категорию бота, складываются): дата — последний день месяца, счет «Карта», тег #импорт. Без --apply ничего не пишется (dry-run).
 
 Запуск на сервере:
     docker compose run --rm bot python -m bot.import_budget            # dry-run
@@ -45,6 +45,7 @@ EXPLICIT_MAP: dict[tuple[OpType, str], str] = {
     (OpType.EXPENSE, "жку+интернет"): "ЖКУ",
     (OpType.EXPENSE, "транспорт/ржд/такси"): "Транспорт/РЖД",
     (OpType.EXPENSE, "еда вне дома/доставки"): "Еда вне дома",
+    (OpType.EXPENSE, "связь"): "Подписки",  # «Связь» объединена с «Подписками»
 }
 
 
@@ -318,18 +319,23 @@ def build_plan(
         if block.month >= current or not (block.income or block.expense):
             continue
         last_day = month_end(block.month)
-        ops, unmapped = [], []
+        unmapped: list[Item] = []
+        grouped: dict[tuple[OpType, str], list[Item]] = {}
         for op_type, items in ((OpType.INCOME, block.income), (OpType.EXPENSE, block.expense)):
             for item in items:
                 cat = map_category(item.name, op_type, categories, overrides)
                 if cat is None:
                     unmapped.append(item)
-                    continue
-                comment = IMPORT_COMMENT if _norm(item.name) == _norm(cat) else f"{IMPORT_COMMENT}: {item.name}"
-                ops.append(Operation(
-                    date=last_day, type=op_type, amount=item.amount, category=cat,
-                    account=account, comment=comment, tags=[IMPORT_TAG],
-                ))
+                else:
+                    grouped.setdefault((op_type, cat), []).append(item)
+        ops = []
+        for (op_type, cat), items in grouped.items():
+            renamed = [i.name for i in items if _norm(i.name) != _norm(cat)]
+            comment = f"{IMPORT_COMMENT}: {', '.join(i.name for i in items)}" if renamed else IMPORT_COMMENT
+            ops.append(Operation(
+                date=last_day, type=op_type, amount=sum((i.amount for i in items), Decimal(0)),
+                category=cat, account=account, comment=comment, tags=[IMPORT_TAG],
+            ))
         existing_ids = [
             op.id for op in existing
             if IMPORT_TAG in op.tags and month_start(op.date) == block.month

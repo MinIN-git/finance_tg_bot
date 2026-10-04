@@ -7,7 +7,7 @@ from bot.categories import DEFAULT_CATEGORIES
 from bot.import_budget import (
     build_plan, format_plan, map_category, month_status, parse_budget, parse_month_label,
 )
-from bot.models import Operation, OpType
+from bot.models import Category, Operation, OpType
 from bot.storage import MemoryStorage
 
 TODAY = date(2026, 10, 4)
@@ -206,3 +206,25 @@ def test_numbered_rows_layout():
     assert plan.unmapped == []
     assert {op.category for op in plan.operations} == {"Зарплата", "Папа", "Прочее", "ЖКУ", "Транспорт/РЖД"}
     assert month_status(plan, replace=False, force=False) == "ok"
+
+
+def test_svyaz_merged_into_subscriptions():
+    cells = {
+        "A1": "Сентябрь",
+        "A2": "Доходы", "C2": "Сумма", "A3": "1", "B3": "Зарплата", "C3": 100.0,
+        "A5": "Расходы", "C5": "Сумма",
+        "A6": "1", "B6": "Связь", "C6": 700.0,
+        "A7": "2", "B7": "Подписки", "C7": 300.5,
+        "A8": "3", "B8": "Ипотека", "C8": 1000.0,
+        "E2": "Доходы за месяц", "F2": 100.0, "E3": "Расходы за месяц", "F3": 2000.5,
+    }
+    blocks, _ = parse_budget(*grid(cells), TODAY)
+    # даже если в листе «Категории» на сервере еще осталась «Связь», импорт кладет ее в «Подписки»
+    cats = DEFAULT_CATEGORIES + [Category("Связь", E, ["связь"])]
+    plan = build_plan(blocks, cats, [], TODAY)[0]
+    by_cat = {op.category: op for op in plan.operations if op.type == E}
+    assert set(by_cat) == {"Подписки", "Ипотека"}
+    assert by_cat["Подписки"].amount == Decimal("1000.5")
+    assert by_cat["Подписки"].comment == "импорт из Бюджета: Связь, Подписки"
+    assert by_cat["Ипотека"].comment == "импорт из Бюджета"
+    assert sum(op.amount for op in plan.operations if op.type == E) == Decimal("2000.5")

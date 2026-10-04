@@ -17,6 +17,8 @@ def test_guess_expense():
     assert g("ипотека") == "Ипотека"
     assert g("яндекс маркет") == "Маркетплейсы"
     assert g("яндекс плюс") == "Подписки"
+    assert g("мобильная связь") == "Подписки"
+    assert g("интернет дома") == "ЖКУ"
 
 
 def test_guess_income_uses_income_categories():
