@@ -153,6 +153,21 @@ def parse_month_label(text: Any, today: date) -> date | None:
     return date(year, month, 1)
 
 
+def _row_name(formatted: Sequence[Sequence[Any]], r: int, c: int, k: int) -> tuple[str, int]:
+    """Название категории в строке: первая нечисловая ячейка левее суммы.
+    Порядковый номер («1», «2.», «№3») в начале строки пропускается."""
+    first = ""
+    for cc in range(c, c + k):
+        text = str(_cell(formatted, r, cc)).strip()
+        if not text:
+            continue
+        if not first:
+            first = text
+        if not re.fullmatch(r"№?\s*\d+[.)]?", text):
+            return text, cc
+    return first, c
+
+
 def _number(raw: Any, formatted: Any) -> Decimal | None:
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         return Decimal(str(raw))
@@ -224,7 +239,7 @@ def parse_budget(formatted: Sequence[Sequence[Any]], raw: Sequence[Sequence[Any]
         items = block.income if table == "доходы" else block.expense
         rr = r + 1
         while rr < len(formatted):
-            name = str(_cell(formatted, rr, c)).strip()
+            name, name_col = _row_name(formatted, rr, c, k)
             n = _norm(name)
             amount = _number(_cell(raw, rr, c + k), _cell(formatted, rr, c + k))
             if not name and amount is None:
@@ -238,7 +253,7 @@ def parse_budget(formatted: Sequence[Sequence[Any]], raw: Sequence[Sequence[Any]
             elif amount < 0:
                 block.problems.append(f"{a1(rr, c + k)}: отрицательная сумма у «{name}»")
             else:
-                items.append(Item(name, amount, a1(rr, c)))
+                items.append(Item(name, amount, a1(rr, name_col)))
             rr += 1
 
     out: dict[date, MonthBlock] = {}

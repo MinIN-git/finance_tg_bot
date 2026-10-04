@@ -178,3 +178,31 @@ def test_memory_storage_batch():
     asyncio.run(s.add_operations(ops))
     assert asyncio.run(s.delete_operations([ops[0].id, ops[2].id, "nope"])) == 2
     assert [o.id for o in asyncio.run(s.list_operations())] == [ops[1].id]
+
+
+def test_numbered_rows_layout():
+    """Раскладка как в реальном листе: «№ | Название | Сумма», заголовок «Доходы» над колонкой номеров."""
+    cells = {
+        "A1": "Сентябрь",
+        "A2": "Доходы", "C2": "Сумма",
+        "A3": "1", "B3": "Зарплата", "C3": 463759.11,
+        "A4": "2", "B4": "Папа", "C4": 16000.0,
+        "A5": "3", "B5": "Подарки", "C5": "",
+        "A6": "4", "B6": "Прочее", "C6": 11627.23,
+        "A8": "Расходы", "C8": "Сумма",
+        "A9": "1", "B9": "ЖКУ + интернет", "C9": 10596.56,
+        "A10": "2", "B10": "Связь", "C10": "",
+        "A11": "3", "B11": "Транспорт/РЖД/Такси", "C11": 200.0,
+        "E2": "Доходы за месяц", "F2": 491386.34,
+        "E3": "Расходы за месяц", "F3": 10796.56,
+    }
+    blocks, warnings = parse_budget(*grid(cells), TODAY)
+    assert warnings == []
+    b = blocks[0]
+    assert [(i.name, i.cell) for i in b.income] == [("Зарплата", "B3"), ("Папа", "B4"), ("Прочее", "B6")]
+    assert [i.name for i in b.expense] == ["ЖКУ + интернет", "Транспорт/РЖД/Такси"]
+    assert b.reconcile() == []
+    plan = build_plan(blocks, DEFAULT_CATEGORIES, [], TODAY)[0]
+    assert plan.unmapped == []
+    assert {op.category for op in plan.operations} == {"Зарплата", "Папа", "Прочее", "ЖКУ", "Транспорт/РЖД"}
+    assert month_status(plan, replace=False, force=False) == "ok"
