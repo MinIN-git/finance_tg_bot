@@ -214,3 +214,30 @@ def test_emoji_column_added_to_old_categories_sheet(monkeypatch):
     old.rows[1][3] = "☕"                                      # правка пользователя
     s.ensure_sheets()                                         # повторный запуск колонку не трогает
     assert old.rows[1][3] == "☕"
+
+
+def test_big_purchases_columns_and_rows(storage):
+    ws = storage._sh.sheets["Большие покупки"]
+    assert ws.rows[0] == ["Дата", "Что купил", "Стоимость", "Категория", "id"]
+    run(storage.add_big_purchase(st.BigPurchase(date(2026, 9, 3), "отпуск турция", Decimal(283122), "Досуг", "op1")))
+    run(storage.add_big_purchase(st.BigPurchase(date(2026, 9, 4), "диван", Decimal(50000), "", "op2")))
+    got = run(storage.list_big_purchases())
+    assert [(b.what, b.category, b.op_id) for b in got] == [("отпуск турция", "Досуг", "op1"), ("диван", "", "op2")]
+    run(storage.set_big_purchase_category("op2", "Прочее"))
+    run(storage.delete_big_purchase("op1"))
+    assert [(b.what, b.category) for b in run(storage.list_big_purchases())] == [("диван", "Прочее")]
+
+
+def test_old_big_sheet_gets_category_column(monkeypatch):
+    import gspread
+
+    client = FakeClient()
+    old = client.sh.add_worksheet("Большие покупки", 100, 3)
+    old.rows = [["Мои крупные траты", "", ""], ["Дата", "Что купил", "Стоимость"], [46280, "Отпуск в Турцию", 283122]]
+    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
+    s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
+    s.ensure_sheets()
+    assert old.rows[1] == ["Дата", "Что купил", "Стоимость", "Категория", "id"]
+    old.rows[2] += ["Досуг"]                          # Иван вписал категорию
+    [b] = run(s.list_big_purchases())
+    assert (b.what, b.category, b.amount) == ("Отпуск в Турцию", "Досуг", 283122)

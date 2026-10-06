@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterable, Mapping, Sequence
 
-from .models import BalanceEntry, BigPurchase, Operation, OpType
+from .models import BalanceEntry, BigPurchase, Operation, OpType, is_heavy
 from .textutil import (
     MONTHS_DATIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_date, fmt_money, fmt_percent, fmt_short_date, month_title,
 )
@@ -106,6 +106,67 @@ def summarize_month(ops: Sequence[Operation], any_day: date) -> Summary:
     return summarize(ops, month_start(any_day), month_end(any_day))
 
 
+# ---------- тяжелые траты ----------
+
+def heavy_items(ops: Sequence[Operation], bigs: Sequence[BigPurchase], start: date, end: date) -> list[BigPurchase]:
+    """Тяжелые траты периода: строки «Больших покупок» + операции с #тяжелое, которых в листе нет."""
+    items = [b for b in bigs if start <= b.date <= end]
+    known = {b.op_id for b in bigs if b.op_id}
+    items += [
+        BigPurchase(op.date, op.comment or op.category, op.amount, op.category, op.id)
+        for op in ops if is_heavy(op) and start <= op.date <= end and op.id not in known
+    ]
+    return sorted(items, key=lambda b: (b.date, b.what))
+
+
+def summarize_clean(ops: Sequence[Operation], bigs: Sequence[BigPurchase], start: date, end: date) -> Summary:
+    """Сводка без тяжелых трат. Операции с #тяжелое просто не учитываются; старые строки листа
+    (без операции) вычитаются из своей категории, а если категория не указана — только из общего расхода."""
+    s = summarize([op for op in ops if not is_heavy(op)], start, end)
+    heavy_ids = {op.id for op in ops if is_heavy(op)}
+    cats = dict(s.expense_by_category)
+    for b in bigs:
+        if not (start <= b.date <= end) or (b.op_id and b.op_id in heavy_ids):
+            continue
+        s.expense = max(s.expense - b.amount, ZERO)
+        if b.category in cats:
+            cats[b.category] = cats[b.category] - b.amount
+    s.expense_by_category = _sorted_totals({k: v for k, v in cats.items() if v > 0})
+    return s
+
+
+def summarize_clean_month(ops: Sequence[Operation], bigs: Sequence[BigPurchase], any_day: date) -> Summary:
+    return summarize_clean(ops, bigs, month_start(any_day), month_end(any_day))
+
+
+@dataclass
+class Usual:
+    """«Обычно» = среднее за прошлые полные месяцы (только месяцы с операциями), без тяжелых трат."""
+    months: list[date]
+    income: Decimal | None
+    expense: Decimal | None
+    by_category: dict[str, Decimal]
+
+
+def usual(ops: Sequence[Operation], bigs: Sequence[BigPurchase], month: date, window: int = 3) -> Usual:
+    first = month_start(month)
+    prev = [summarize_clean_month(ops, bigs, add_months(first, -i)) for i in range(1, window + 1)]
+    prev = [p for p in prev if p.count]
+    if not prev:
+        return Usual([], None, None, {})
+    n = Decimal(len(prev))
+    cats: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    for p in prev:
+        for name, amount in p.expense_by_category:
+            cats[name] += amount
+    return Usual(
+        months=sorted(p.start for p in prev),
+        income=sum((p.income for p in prev), ZERO) / n,
+        expense=sum((p.expense for p in prev), ZERO) / n,
+        by_category={k: v / n for k, v in cats.items()},
+    )
+
+
 # ---------- месячный отчет ----------
 
 @dataclass
@@ -150,7 +211,7 @@ def monthly_report(ops: Sequence[Operation], month: date, avg_window: int = 3) -
 
 # ---------- форматирование ----------
 
-HIDDEN_TAGS = {"импорт"}           # служебные теги в отчетах не показываем
+HIDDEN_TAGS = {"импорт", "тяжелое"}           # служебные теги в отчетах не показываем
 NEAR_AVERAGE_PCT = 3               # |отклонение| меньше — «≈ среднее»
 MULTIPLIER_FROM = 3                # с ×3 вместо процентов показываем разницу в деньгах и множитель
 

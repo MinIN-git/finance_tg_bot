@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from . import reports
 from .categories import find_category, guess_category, learnable_keyword
-from .models import Account, BalanceEntry, Category, Operation, OpType
+from .models import HEAVY_TAG, HEAVY_TAG_ALIASES, Account, BalanceEntry, BigPurchase, Category, Operation, OpType, is_heavy
 from .parser import parse_message
 from .state import State
 from .storage import Storage
@@ -103,7 +103,7 @@ class FinanceService:
             account=parsed.account or (accounts[0] if accounts else ""),
             to_account=parsed.to_account or "",
             comment=parsed.comment,
-            tags=parsed.tags,
+            tags=list(dict.fromkeys(HEAVY_TAG if t in HEAVY_TAG_ALIASES else t for t in parsed.tags)),
         )
         if op.type == OpType.TRANSFER:
             return Prepared(op, needs_category=False)
@@ -124,6 +124,13 @@ class FinanceService:
 
     async def save(self, op: Operation) -> Operation:
         await self.storage.add_operation(op)
+        if is_heavy(op):
+            try:
+                await self.storage.add_big_purchase(
+                    BigPurchase(op.date, op.comment or op.category, op.amount, op.category, op.id)
+                )
+            except Exception:
+                log.exception("Не удалось дописать тяжелую трату в «Большие покупки»")
         return op
 
     def stash(self, op: Operation, type_choices: dict[OpType, str] | None = None) -> str:
@@ -174,16 +181,21 @@ class FinanceService:
         op = replace(current, category=category, tags=list(current.tags))
         if not await self.storage.update_operation(op):
             return None
+        if is_heavy(op):
+            await self.storage.set_big_purchase_category(op.id, category)
         return op
 
     async def undo(self) -> Operation | None:
         ops = await self.storage.list_operations()
         if not ops:
             return None
-        return await self.storage.delete_operation(ops[-1].id)
+        return await self.delete(ops[-1].id)
 
     async def delete(self, op_id: str) -> Operation | None:
-        return await self.storage.delete_operation(op_id)
+        op = await self.storage.delete_operation(op_id)
+        if op is not None and is_heavy(op):
+            await self.storage.delete_big_purchase(op.id)
+        return op
 
     async def last(self, n: int = 10) -> list[Operation]:
         await self._categories()
@@ -202,6 +214,8 @@ class FinanceService:
             parts.append(html.escape(op.comment))
         if op.type != OpType.TRANSFER and op.account:
             parts.append(f"@{html.escape(op.account)}")
+        if is_heavy(op):
+            parts.append("🧾 тяжелая трата")
         tags = [t for t in op.tags if t not in reports.HIDDEN_TAGS]
         if tags:
             parts.append(" ".join(f"#{html.escape(t)}" for t in tags))

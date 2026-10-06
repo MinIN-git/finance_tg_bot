@@ -6,6 +6,7 @@ import copy
 import logging
 import re
 import time
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -33,7 +34,7 @@ HEADERS = {
     SHEET_ACCOUNTS: ["Название", "Вопрос для ежемесячного снимка"],
     SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
-    SHEET_BIG: ["Дата", "Что купил", "Стоимость"],
+    SHEET_BIG: ["Дата", "Что купил", "Стоимость", "Категория", "id"],
 }
 
 
@@ -85,6 +86,15 @@ class Storage(ABC):
     async def list_big_purchases(self) -> list[BigPurchase]:
         """Разовые крупные траты (лист «Большие покупки»)."""
         return []
+
+    async def add_big_purchase(self, item: BigPurchase) -> None:
+        """Дописать строку в «Большие покупки»."""
+
+    async def delete_big_purchase(self, op_id: str) -> None:
+        """Убрать строку, которую бот дописал для операции op_id."""
+
+    async def set_big_purchase_category(self, op_id: str, category: str) -> None:
+        """Поменять категорию у строки операции op_id."""
 
     async def refresh(self) -> None:
         """Сбросить кэш (если он есть)."""
@@ -145,6 +155,17 @@ class MemoryStorage(Storage):
 
     async def list_big_purchases(self) -> list[BigPurchase]:
         return list(self.big_purchases)
+
+    async def add_big_purchase(self, item: BigPurchase) -> None:
+        self.big_purchases.append(item)
+
+    async def delete_big_purchase(self, op_id: str) -> None:
+        self.big_purchases = [b for b in self.big_purchases if not (op_id and b.op_id == op_id)]
+
+    async def set_big_purchase_category(self, op_id: str, category: str) -> None:
+        for b in self.big_purchases:
+            if op_id and b.op_id == op_id:
+                b.category = category
 
     async def add_balance(self, entry: BalanceEntry) -> None:
         self.balances = [
@@ -225,6 +246,15 @@ def row_to_op(row: list[Any]) -> Operation | None:
     )
 
 
+def _col_letter(col: int) -> str:
+    letters = ""
+    col += 1
+    while col:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 def _month_cell(value: Any) -> date | None:
     """«09.2026» / «сентябрь 2026» нет — только дата или «мм.гггг»."""
     m = re.fullmatch(r"(\d{1,2})\.(\d{4})", str(value).strip())
@@ -233,38 +263,58 @@ def _month_cell(value: Any) -> date | None:
     return None
 
 
-def parse_big_purchases(formatted: list[list[Any]], raw: list[list[Any]]) -> list[BigPurchase]:
-    """Лист «Большие покупки»: ищет строку заголовка с «Дата» и «Стоимость» (или «Сумма»),
-    колонка описания — «Что купил»/«Покупка»/«Название»; читает строки ниже."""
-    def norm(v: Any) -> str:
-        return str(v).strip().lower().replace("ё", "е")
+@dataclass
+class BigLayout:
+    """Где на листе «Большие покупки» строка заголовка и нужные колонки (индексы с 0)."""
+    header: int
+    date_col: int
+    cost_col: int
+    what_col: int | None
+    cat_col: int | None
+    id_col: int | None
+    width: int
 
-    header = date_col = cost_col = what_col = None
+
+def _norm_cell(v: Any) -> str:
+    return str(v).strip().lower().replace("ё", "е")
+
+
+def find_big_layout(formatted: list[list[Any]]) -> BigLayout | None:
     for r, row in enumerate(formatted):
-        cells = [norm(v) for v in row]
+        cells = [_norm_cell(v) for v in row]
         d = next((i for i, v in enumerate(cells) if v.startswith("дата")), None)
         c = next((i for i, v in enumerate(cells) if v.startswith(("стоимост", "сумма", "цена"))), None)
-        if d is not None and c is not None:
-            header, date_col, cost_col = r, d, c
-            what_col = next(
-                (i for i, v in enumerate(cells) if i not in (d, c) and v.startswith(("что", "покуп", "назван", "описан"))),
-                None,
-            )
-            break
-    if header is None:
+        if d is None or c is None:
+            continue
+        what = next((i for i, v in enumerate(cells) if i not in (d, c) and v.startswith(("что", "покуп", "назван", "описан"))), None)
+        cat = next((i for i, v in enumerate(cells) if v.startswith("категор")), None)
+        oid = next((i for i, v in enumerate(cells) if v == "id"), None)
+        width = max((i + 1 for i, v in enumerate(cells) if v), default=0)
+        return BigLayout(r, d, c, what, cat, oid, width)
+    return None
+
+
+def parse_big_purchases(formatted: list[list[Any]], raw: list[list[Any]]) -> list[BigPurchase]:
+    """Лист «Большие покупки»: строка заголовка с «Дата» и «Стоимость» (или «Сумма»), колонки
+    «Что купил»/«Покупка», «Категория» и служебная «id» необязательны; читает строки ниже."""
+    lay = find_big_layout(formatted)
+    if lay is None:
         return []
     out = []
-    for r in range(header + 1, len(formatted)):
+    for r in range(lay.header + 1, len(formatted)):
         def cell(grid, c):
             row = grid[r] if r < len(grid) else []
             return row[c] if c is not None and c < len(row) else ""
-        d = cell(raw, date_col)
+        d = cell(raw, lay.date_col)
         when = cell_to_date(d) if str(d).strip() else None
-        when = when or _month_cell(cell(formatted, date_col)) or cell_to_date(cell(formatted, date_col))
-        amount = cell_to_decimal(cell(raw, cost_col)) if str(cell(raw, cost_col)).strip() else None
+        when = when or _month_cell(cell(formatted, lay.date_col)) or cell_to_date(cell(formatted, lay.date_col))
+        amount = cell_to_decimal(cell(raw, lay.cost_col)) if str(cell(raw, lay.cost_col)).strip() else None
         if when is None or amount is None or amount <= 0:
             continue
-        out.append(BigPurchase(when, str(cell(formatted, what_col)).strip(), amount))
+        out.append(BigPurchase(
+            when, str(cell(formatted, lay.what_col)).strip(), amount,
+            str(cell(formatted, lay.cat_col)).strip(), str(cell(formatted, lay.id_col)).strip(),
+        ))
     return out
 
 
@@ -311,6 +361,7 @@ class SheetsStorage(Storage):
             ws.freeze(rows=1)
         if SHEET_CATEGORIES in existing:
             self._add_emoji_column()
+        self.ensure_big_columns()
 
     def _add_emoji_column(self) -> None:
         """Для листа «Категории», созданного старой версией: дописать колонку «Эмодзи» с эмодзи
@@ -523,6 +574,73 @@ class SheetsStorage(Storage):
             log.warning("Не удалось прочитать лист «%s»", SHEET_BIG, exc_info=True)
             return []
         return parse_big_purchases(formatted, raw)
+
+    def _big_layout(self) -> BigLayout | None:
+        """Раскладка листа; при необходимости дописывает колонки «Категория» и «id» в заголовок."""
+        ws = self._ws(SHEET_BIG)
+        lay = find_big_layout(ws.get_all_values())
+        if lay is None:
+            return None
+        missing = [(name, attr) for name, attr in (("Категория", "cat_col"), ("id", "id_col")) if getattr(lay, attr) is None]
+        if missing:
+            col = lay.width
+            if ws.col_count < col + len(missing):
+                ws.add_cols(col + len(missing) - ws.col_count)
+            for name, attr in missing:
+                log.info("Добавляю колонку «%s» в лист «%s»", name, SHEET_BIG)
+                ws.update([[name]], f"{_col_letter(col)}{lay.header + 1}", value_input_option="RAW")
+                setattr(lay, attr, col)
+                col += 1
+            lay.width = col
+        return lay
+
+    def ensure_big_columns(self) -> None:
+        try:
+            self._big_layout()
+        except Exception:
+            log.warning("Не удалось подготовить лист «%s»", SHEET_BIG, exc_info=True)
+
+    async def add_big_purchase(self, item: BigPurchase) -> None:
+        async with self._lock:
+            lay = await self._run(self._big_layout)
+            if lay is None:
+                raise RuntimeError(f"На листе «{SHEET_BIG}» не найден заголовок (Дата, Что купил, Стоимость)")
+            row: list[Any] = [""] * lay.width
+            row[lay.date_col] = item.date.isoformat()
+            row[lay.cost_col] = number_for_sheet(item.amount)
+            if lay.what_col is not None:
+                row[lay.what_col] = text_for_sheet(item.what)
+            row[lay.cat_col] = text_for_sheet(item.category)
+            row[lay.id_col] = text_for_sheet(item.op_id)
+            await self._run(
+                self._ws(SHEET_BIG).append_row, row,
+                value_input_option="USER_ENTERED", table_range=f"A{lay.header + 1}",
+            )
+
+    def _big_row(self, op_id: str) -> tuple[BigLayout, int] | tuple[None, None]:
+        lay = self._big_layout()
+        if lay is None or not op_id:
+            return None, None
+        ids = self._ws(SHEET_BIG).col_values(lay.id_col + 1)
+        for idx in range(len(ids) - 1, lay.header, -1):
+            if ids[idx] == op_id:
+                return lay, idx + 1
+        return None, None
+
+    async def delete_big_purchase(self, op_id: str) -> None:
+        async with self._lock:
+            _, row = await self._run(self._big_row, op_id)
+            if row:
+                await self._run(self._ws(SHEET_BIG).delete_rows, row)
+
+    async def set_big_purchase_category(self, op_id: str, category: str) -> None:
+        async with self._lock:
+            lay, row = await self._run(self._big_row, op_id)
+            if row:
+                await self._run(
+                    self._ws(SHEET_BIG).update, [[text_for_sheet(category)]],
+                    f"{_col_letter(lay.cat_col)}{row}", value_input_option="USER_ENTERED",
+                )
 
     async def refresh(self) -> None:
         async with self._lock:

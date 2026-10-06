@@ -55,6 +55,16 @@ class BigPurchase:
     date: date
     what: str
     amount: Decimal
+    category: str = ""     # пусто у старых строк — тогда трата вычитается только из общего расхода
+    op_id: str = ""        # id операции, если строку дописал бот по тегу #тяжелое
+
+
+HEAVY_TAG = "тяжелое"
+HEAVY_TAG_ALIASES = {"тяжелое", "тяжелая", "крупное", "крупная"}
+
+
+def is_heavy(op: "Operation") -> bool:
+    return op.type == OpType.EXPENSE and HEAVY_TAG in op.tags
 
 
 @dataclass
