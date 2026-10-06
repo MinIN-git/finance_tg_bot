@@ -188,3 +188,26 @@ def test_russian_aliases(h):
     assert "⚖️" in texts(h.text("/сравнить август сентябрь"))[0]
     assert "🧾" in texts(h.text("/крупные"))[0]
     assert "💼" in texts(h.text("/деньги"))[0]
+
+
+def test_signals_command_and_quarter(h):
+    assert "выключены" in texts(h.text("/signals off"))[0]
+    assert h.svc.state.get("signals_enabled") is False
+    assert "включены" in texts(h.text("/сигналы on"))[0]
+    out = h.text("/quarter")
+    from aiogram.methods import SendPhoto
+    assert any(isinstance(m, SendPhoto) for m in out)
+    assert "📈" in texts(out)[-1]
+
+
+def test_month_close_on_quarter_start_sends_chart():
+    from aiogram.methods import SendPhoto
+    from bot.notify import send_month_close
+    hh = Harness(MemoryStorage())
+    hh.svc._today_fn = lambda: datetime.date(2026, 10, 1)
+    asyncio.run(send_month_close(hh.bot, 1, hh.svc))
+    assert any(isinstance(m, SendPhoto) for m in hh.session.sent)
+    hh.session.sent.clear()
+    hh.svc._today_fn = lambda: datetime.date(2026, 11, 1)
+    asyncio.run(send_month_close(hh.bot, 1, hh.svc))
+    assert not any(isinstance(m, SendPhoto) for m in hh.session.sent)

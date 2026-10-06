@@ -1,7 +1,9 @@
 """Бизнес-логика бота, не зависящая от Telegram."""
 from __future__ import annotations
 
+import asyncio
 import html
+import logging
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, replace
@@ -17,6 +19,8 @@ from .parser import parse_message
 from .state import State
 from .storage import Storage
 from .textutil import fmt_money, fmt_short_date, normalize
+
+log = logging.getLogger(__name__)
 
 PENDING_LIMIT = 50
 PLAIN_AMOUNT_RE = re.compile(r"^(\d+(?:[.,]\d{1,2})?)(к|k)?(?:р|руб|₽|€|\$|eur|евро)?\.?$")
@@ -237,6 +241,27 @@ class FinanceService:
         ops = await self.storage.list_operations()
         icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
         return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
+
+    async def quarter_report(self) -> tuple[str, bytes | None]:
+        """Текст квартального отчета (три полных месяца перед текущим) и картинка."""
+        ops = await self.storage.list_operations()
+        balances = await self.storage.list_balances()
+        q = reports.quarter_report(ops, await self.storage.list_big_purchases(), balances, self.today())
+        png = None
+        try:
+            from .charts import quarter_chart
+
+            months, inc, exp, cap = reports.chart_series(ops, balances, self.today())
+            png = await asyncio.to_thread(quarter_chart, months, inc, exp, cap, reports.quarter_title(q))
+        except Exception:
+            log.exception("Не удалось нарисовать график")
+        return reports.format_quarter(q, self.cur), png
+
+    async def signals(self) -> list[tuple[str, str]]:
+        await self._categories()
+        return reports.find_signals(
+            await self.storage.list_operations(), await self.storage.list_balances(), self.today(), self.cur, self._icons,
+        )
 
     async def compare_text(self, args: str | None) -> str:
         from .import_budget import parse_month_label

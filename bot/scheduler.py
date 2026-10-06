@@ -8,11 +8,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .config import Config
 from .handlers import snapshot_question_view
+from .notify import send_month_close, send_signals
 from .service import FinanceService
 from .textutil import MONTHS_NOMINATIVE
 
 log = logging.getLogger(__name__)
 
+SIGNALS_HOUR = 20   # ежедневная проверка сигналов (отправка — не чаще раза в неделю)
 FALLBACK_HOUR = 21  # если до этого часа 1 числа опрос не пройден — итоги приходят без свежего снимка
 
 
@@ -24,8 +26,7 @@ async def monthly_job(bot: Bot, svc: FinanceService, user_ids: frozenset[int]) -
         try:
             q = await svc.start_snapshot(uid, purpose="monthly")
             if q is None:  # счетов нет — сразу итоги
-                await bot.send_message(uid, await svc.month_close_text())
-                svc.state.mark_month_closed(svc.today().strftime("%Y-%m"))
+                await send_month_close(bot, uid, svc)
                 continue
             await bot.send_message(uid, f"📅 Подводим итоги: {prev_month}. Сначала остатки по счетам — итоги придут сразу после.")
             text, kb = snapshot_question_view(q, svc.cur)
@@ -39,15 +40,22 @@ async def monthly_fallback_job(bot: Bot, svc: FinanceService, user_ids: frozense
     key = svc.today().strftime("%Y-%m")
     if svc.state.month_closed(key):
         return
-    report = await svc.month_close_text()
     for uid in user_ids:
         try:
-            await bot.send_message(uid, report)
+            await send_month_close(bot, uid, svc)
             if svc.snapshot_question(uid) is not None:
                 await bot.send_message(uid, "Опрос остатков еще открыт — после ответов пришлю итоги со сверкой капитала.")
         except Exception:
             log.exception("Не удалось отправить итоги месяца пользователю %s", uid)
     svc.state.mark_month_closed(key)
+
+
+async def signals_job(bot: Bot, svc: FinanceService, user_ids: frozenset[int]) -> None:
+    try:
+        await svc.storage.refresh()
+        await send_signals(bot, user_ids, svc)
+    except Exception:
+        log.exception("Ошибка при проверке сигналов")
 
 
 def setup_scheduler(bot: Bot, svc: FinanceService, config: Config) -> AsyncIOScheduler:
@@ -60,5 +68,8 @@ def setup_scheduler(bot: Bot, svc: FinanceService, config: Config) -> AsyncIOSch
     scheduler.add_job(
         monthly_fallback_job, CronTrigger(day=1, hour=FALLBACK_HOUR, minute=0, timezone=config.tz),
         id="monthly_fallback", **common,
+    )
+    scheduler.add_job(
+        signals_job, CronTrigger(hour=SIGNALS_HOUR, minute=0, timezone=config.tz), id="signals", **common,
     )
     return scheduler

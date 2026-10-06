@@ -45,6 +45,8 @@ HELP = """<b>Как записывать</b>
 /snapshot — внеплановый опрос остатков по счетам (/деньги)
 /compare август сентябрь — сравнить два месяца (/сравнить)
 /big — разовые траты за год и их доля (/крупные)
+/quarter — квартальный отчет с графиком (/квартал)
+/signals on|off — мягкие сигналы (/сигналы)
 /categories — категории и ключевые слова
 /refresh — перечитать таблицу после ручных правок"""
 
@@ -200,6 +202,31 @@ async def cmd_big(message: Message, svc: FinanceService) -> None:
     await message.answer(await svc.big_text())
 
 
+@router.message(Command("quarter", "квартал"))
+async def cmd_quarter(message: Message, svc: FinanceService) -> None:
+    from .notify import send_quarter
+
+    await send_quarter(message.bot, message.chat.id, svc)
+
+
+@router.message(Command("signals", "сигналы"))
+async def cmd_signals(message: Message, command: CommandObject, svc: FinanceService) -> None:
+    arg = (command.args or "").strip().lower()
+    if arg in ("on", "вкл"):
+        svc.state.set("signals_enabled", True)
+    elif arg in ("off", "выкл"):
+        svc.state.set("signals_enabled", False)
+    enabled = svc.state.get("signals_enabled", True)
+    text = ("🔔 Сигналы включены: не чаще раза в неделю бот напомнит, если категория к 20-му числу "
+            "превысила свое обычное за месяц, «Прочее» больше 10% расходов или не сошлась сверка капитала. "
+            "Выключить: /signals off") if enabled else "🔕 Сигналы выключены. Включить: /signals on"
+    if enabled and arg not in ("on", "вкл"):
+        current = await svc.signals()
+        if current:
+            text += "\n\nСейчас:\n" + "\n".join(f"• {t}" for _, t in current)
+    await message.answer(text)
+
+
 @router.message(Command("categories"))
 async def cmd_categories(message: Message, svc: FinanceService) -> None:
     await message.answer(await svc.categories_text())
@@ -257,8 +284,9 @@ async def send_snapshot_step(message: Message, svc: FinanceService, nxt: Snapsho
         text, kb = snapshot_question_view(nxt, svc.cur)
         await message.answer(text, reply_markup=kb)
     elif svc.pop_finished_purpose(message.chat.id) == "monthly":
-        await message.answer(await svc.month_close_text())
-        svc.state.mark_month_closed(svc.today().strftime("%Y-%m"))
+        from .notify import send_month_close
+
+        await send_month_close(message.bot, message.chat.id, svc)
     else:
         await message.answer(await svc.capital_text())
 

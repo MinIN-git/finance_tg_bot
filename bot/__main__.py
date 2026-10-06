@@ -27,6 +27,8 @@ COMMANDS = [
     BotCommand(command="snapshot", description="Внеплановый опрос остатков по счетам"),
     BotCommand(command="compare", description="Сравнить два месяца: /compare август сентябрь"),
     BotCommand(command="big", description="Разовые траты за год"),
+    BotCommand(command="quarter", description="Квартальный отчет с графиком"),
+    BotCommand(command="signals", description="Сигналы: /signals on | off"),
     BotCommand(command="categories", description="Категории"),
     BotCommand(command="refresh", description="Перечитать таблицу"),
     BotCommand(command="help", description="Справка"),

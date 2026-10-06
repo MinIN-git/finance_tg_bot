@@ -710,3 +710,145 @@ def format_month_close(mc: MonthClose, cur: str = "", icons: Icons | None = None
     if s.count:
         lines += ["", report_conclusion(r, cur, icons)]
     return "\n".join(lines)
+
+
+# ---------- квартальный отчет ----------
+
+QUARTER_START_MONTHS = (1, 4, 7, 10)
+
+
+def capital_at_month_end(balances: Sequence[BalanceEntry], month: date) -> Decimal | None:
+    """Итог снимка, закрывающего месяц: последний снимок в пределах ±6 дней от конца месяца."""
+    end = month_end(month)
+    lo, hi = end - timedelta(days=SNAPSHOT_GRACE_DAYS), end + timedelta(days=SNAPSHOT_GRACE_DAYS + 1)
+    candidates = [(d, total) for d, total in snapshot_totals(balances) if lo < d <= hi]
+    return candidates[-1][1] if candidates else None
+
+
+@dataclass
+class QuarterReport:
+    months: list[date]                 # три полных месяца квартала
+    summary: Summary
+    monthly: list[Summary]
+    big_total: Decimal
+    capital_start: Decimal | None      # на конец месяца перед кварталом
+    capital_end: Decimal | None
+
+
+def quarter_report(ops: Sequence[Operation], bigs: Sequence[BigPurchase], balances: Sequence[BalanceEntry], today: date) -> QuarterReport:
+    """Квартал — три полных месяца перед текущим."""
+    first = add_months(month_start(today), -3)
+    months = [add_months(first, i) for i in range(3)]
+    last = month_end(months[-1])
+    return QuarterReport(
+        months=months,
+        summary=summarize(ops, first, last),
+        monthly=[summarize_month(ops, m) for m in months],
+        big_total=big_total(bigs, first, last),
+        capital_start=capital_at_month_end(balances, add_months(first, -1)),
+        capital_end=capital_at_month_end(balances, months[-1]),
+    )
+
+
+def quarter_title(q: QuarterReport) -> str:
+    a, b = q.months[0], q.months[-1]
+    return f"Квартал: {MONTHS_NOMINATIVE[a.month - 1]}–{MONTHS_NOMINATIVE[b.month - 1]} {b.year}"
+
+
+def format_quarter(q: QuarterReport, cur: str = "") -> str:
+    s = q.summary
+    m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
+    lines = [f"📈 <b>{quarter_title(q)}</b>", "", *format_totals(s, cur)]
+    if q.big_total:
+        wo = s.income - max(s.expense - q.big_total, ZERO)
+        rate = f" · сбережения {fmt_percent(wo / s.income * 100)}" if s.income > 0 else ""
+        lines.append(f"🧾 Разовые: {m(q.big_total)} · без них сальдо {m(wo, True)}{rate}")
+    if q.capital_end is not None:
+        line = f"💼 Капитал на конец квартала: <b>{m(q.capital_end)}</b>"
+        if q.capital_start is not None:
+            line += f" ({m(q.capital_end - q.capital_start, True)} за квартал)"
+        lines.append(line)
+    lines += ["", "<b>По месяцам</b>"]
+    for ms in q.monthly:
+        mark = "🟢" if ms.balance >= 0 else "🔴"
+        lines.append(f"{mark} {MONTHS_SHORT[ms.start.month - 1]}: доход {m(ms.income)} · расход {m(ms.expense)} · сальдо {m(ms.balance, True)}")
+    return "\n".join(lines)
+
+
+def chart_series(ops: Sequence[Operation], balances: Sequence[BalanceEntry], today: date, n: int = 12):
+    """Данные для картинки: последние n полных месяцев (без текущего)."""
+    months = [add_months(month_start(today), -i) for i in range(n, 0, -1)]
+    sums = [summarize_month(ops, mo) for mo in months]
+    # обрезать пустые месяцы в начале истории
+    while len(months) > 3 and sums[0].count == 0 and capital_at_month_end(balances, months[0]) is None:
+        months, sums = months[1:], sums[1:]
+    return (
+        months,
+        [s.income for s in sums],
+        [s.expense for s in sums],
+        [capital_at_month_end(balances, mo) for mo in months],
+    )
+
+
+# ---------- мягкие сигналы ----------
+
+SIGNAL_CATEGORY_FROM_DAY = 20
+OTHER_SHARE = Decimal("0.10")
+OTHER_FROM_DAY = 10
+
+
+def category_month_averages(ops: Sequence[Operation], today: date, window: int = 3) -> dict[str, Decimal]:
+    """Средний расход по категориям за полный месяц (прошлые месяцы с операциями, текущий не входит)."""
+    prev = [summarize_month(ops, add_months(month_start(today), -i)) for i in range(1, window + 1)]
+    prev = [p for p in prev if p.count]
+    if not prev:
+        return {}
+    totals: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    for p in prev:
+        for name, amount in p.expense_by_category:
+            totals[name] += amount
+    return {k: v / len(prev) for k, v in totals.items()}
+
+
+def find_signals(
+    ops: Sequence[Operation],
+    balances: Sequence[BalanceEntry],
+    today: date,
+    cur: str = "",
+    icons: Icons | None = None,
+) -> list[tuple[str, str]]:
+    """Список (ключ, текст). Ключ нужен, чтобы один и тот же сигнал не повторялся."""
+    out: list[tuple[str, str]] = []
+    first = month_start(today)
+    key_month = first.strftime("%Y-%m")
+    s = summarize(ops, first, today)
+
+    if today.day >= SIGNAL_CATEGORY_FROM_DAY:
+        avgs = category_month_averages(ops, today)
+        for name, amount in s.expense_by_category:
+            avg = avgs.get(name)
+            if avg and amount > avg:
+                out.append((
+                    f"cat:{key_month}:{name}",
+                    f"{_icon(icons, OpType.EXPENSE, name)}{html.escape(name)}: уже {fmt_money(amount, cur)} к {today.day}-му — "
+                    f"больше, чем обычно уходит за весь месяц (≈ {fmt_money(avg.quantize(Decimal(1)), cur)})",
+                ))
+
+    other = dict(s.expense_by_category).get("Прочее", ZERO)
+    if today.day >= OTHER_FROM_DAY and s.expense > 0 and other > s.expense * OTHER_SHARE:
+        out.append((
+            f"other:{key_month}",
+            f"{_icon(icons, OpType.EXPENSE, 'Прочее')}«Прочее» — {fmt_percent(other / s.expense * 100)} расходов месяца "
+            f"({fmt_money(other, cur)}). Возможно, стоит разнести по категориям или завести новую.",
+        ))
+
+    c = capital_summary(balances, ops)
+    if c is not None and c.unaccounted is not None and c.ops_month is not None:
+        income = summarize_month(ops, c.ops_month).income
+        if income > 0 and abs(c.unaccounted) > income * RECONCILE_WARN_SHARE:
+            out.append((
+                f"reconcile:{c.date.isoformat()}",
+                f"💼 Сверка за {MONTHS_NOMINATIVE[c.ops_month.month - 1]} не сходится на "
+                f"{fmt_money(c.unaccounted, cur, signed=True)} — похоже, часть трат или доходов не записана.",
+            ))
+    return out

@@ -3,3 +3,4 @@ gspread==6.2.1
 APScheduler==3.11.3
 python-dotenv==1.2.4
 tzdata>=2024.1
+matplotlib==3.11.2
