@@ -8,7 +8,9 @@ from aiogram import BaseMiddleware, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject
+from aiogram.types import (
+    CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .models import Category, Operation, OpType
@@ -28,7 +30,9 @@ HELP = """<b>Как записывать</b>
 <code>5000 Карта -> Наличные</code> — перевод между счетами
 Копейки — через запятую: <code>99,90 молоко</code>. Можно <code>1.5к</code> = 1500.
 
-Если категорию не удалось угадать, бот предложит кнопки и запомнит слово.
+Без «+» сумма считается расходом, но если слово есть только у доходной категории
+(например, «стипендия» в «Прочее»), запишется доход. Если слово подходит и туда, и туда, бот спросит.
+Если категорию не удалось угадать, бот предложит кнопки (с переключателем «это доход») и запомнит слово.
 
 <b>Команды</b>
 /month — текущий месяц
@@ -44,7 +48,12 @@ HELP = """<b>Как записывать</b>
 
 class PickCat(CallbackData, prefix="pc"):
     pid: str
-    idx: int  # -1 — отмена
+    idx: int  # -1 — отмена, -2 — переключить доход/расход
+
+
+class PickType(CallbackData, prefix="pt"):
+    pid: str
+    income: bool
 
 
 class ChangeCat(CallbackData, prefix="cc"):
@@ -81,15 +90,49 @@ class WhitelistMiddleware(BaseMiddleware):
 
 # ---------- клавиатуры ----------
 
-def category_keyboard(categories: list[Category], make_cb: Callable[[int], CallbackData], cancel: CallbackData | None) -> InlineKeyboardMarkup:
+CANCEL_TEXT = "✖️ Не записывать"
+
+
+def category_keyboard(
+    categories: list[Category],
+    make_cb: Callable[[int], CallbackData],
+    cancel: CallbackData | None,
+    toggle: tuple[str, CallbackData] | None = None,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(categories):
         kb.button(text=c.name, callback_data=make_cb(i))
     kb.adjust(2)
+    extra = []
+    if toggle is not None:
+        extra.append(InlineKeyboardButton(text=toggle[0], callback_data=toggle[1].pack()))
     if cancel is not None:
-        kb.row()
-        kb.button(text="✖️ Отмена", callback_data=cancel)
+        extra.append(InlineKeyboardButton(text=CANCEL_TEXT, callback_data=cancel.pack()))
+    if extra:
+        kb.row(*extra)
     return kb.as_markup()
+
+
+async def pick_category_view(svc: FinanceService, pid: str, op: Operation) -> tuple[str, InlineKeyboardMarkup]:
+    """Выбор категории для новой операции + переключатель «это доход/расход»."""
+    cats = await svc.categories_for(op.type)
+    toggle_text = "🔄 Это доход" if op.type == OpType.EXPENSE else "🔄 Это расход"
+    kb = category_keyboard(
+        cats, lambda i: PickCat(pid=pid, idx=i), PickCat(pid=pid, idx=-1),
+        toggle=(toggle_text, PickCat(pid=pid, idx=-2)),
+    )
+    return f"Выберите категорию для: {svc.describe(op)}", kb
+
+
+def pick_type_view(svc: FinanceService, pid: str, op: Operation, choices: dict[OpType, str]) -> tuple[str, InlineKeyboardMarkup]:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🟢 Доход · {choices[OpType.INCOME]}", callback_data=PickType(pid=pid, income=True))
+    kb.button(text=f"🔴 Расход · {choices[OpType.EXPENSE]}", callback_data=PickType(pid=pid, income=False))
+    kb.button(text=CANCEL_TEXT, callback_data=PickCat(pid=pid, idx=-1))
+    kb.adjust(1)
+    what = html.escape(op.comment) if op.comment else "операция"
+    text = f"«{what}» {fmt_money(op.amount, svc.cur)} — это доход или расход?"
+    return text, kb.as_markup()
 
 
 def saved_keyboard(op: Operation) -> InlineKeyboardMarkup:
@@ -243,25 +286,54 @@ async def on_text(message: Message, svc: FinanceService) -> None:
         return
 
     op = prepared.op
+    if prepared.type_choices:
+        pid = svc.stash(op, prepared.type_choices)
+        text, kb = pick_type_view(svc, pid, op, prepared.type_choices)
+        await message.answer(text, reply_markup=kb)
+        return
     if prepared.needs_category:
         pid = svc.stash(op)
-        cats = await svc.categories_for(op.type)
-        kb = category_keyboard(cats, lambda i: PickCat(pid=pid, idx=i), PickCat(pid=pid, idx=-1))
-        await message.answer(f"Выберите категорию для: {svc.describe(op)}", reply_markup=kb)
+        text, kb = await pick_category_view(svc, pid, op)
+        await message.answer(text, reply_markup=kb)
         return
 
     await svc.save(op)
     await message.answer(f"✅ {svc.describe(op)}", reply_markup=saved_keyboard(op))
 
 
+STALE = "Эта операция устарела (бот перезапускался) — отправьте ее заново"
+
+
+@router.callback_query(PickType.filter())
+async def on_pick_type(call: CallbackQuery, callback_data: PickType, svc: FinanceService) -> None:
+    op = svc.get_pending(callback_data.pid)
+    choices = svc.pending_choices(callback_data.pid)
+    if op is None or not choices:
+        await call.answer(STALE, show_alert=True)
+        return
+    op.type = OpType.INCOME if callback_data.income else OpType.EXPENSE
+    op.category = choices[op.type]
+    await svc.save(op)
+    svc.pop_pending(callback_data.pid)
+    await call.message.edit_text(f"✅ {svc.describe(op)}", reply_markup=saved_keyboard(op))
+    await call.answer()
+
+
 @router.callback_query(PickCat.filter())
 async def on_pick_category(call: CallbackQuery, callback_data: PickCat, svc: FinanceService) -> None:
-    op = svc.pop_pending(callback_data.pid)
+    op = svc.get_pending(callback_data.pid)
     if op is None:
-        await call.answer("Операция устарела — отправьте ее заново", show_alert=True)
+        await call.answer(STALE, show_alert=True)
         return
-    if callback_data.idx < 0:
-        await call.message.edit_text("✖️ Не записано.")
+    if callback_data.idx == -1:
+        svc.pop_pending(callback_data.pid)
+        await call.message.edit_text(f"✖️ Отменено, не записано: {svc.describe(op)}")
+        await call.answer()
+        return
+    if callback_data.idx == -2:
+        op.type = OpType.INCOME if op.type == OpType.EXPENSE else OpType.EXPENSE
+        text, kb = await pick_category_view(svc, callback_data.pid, op)
+        await call.message.edit_text(text, reply_markup=kb)
         await call.answer()
         return
     cats = await svc.categories_for(op.type)
@@ -270,6 +342,7 @@ async def on_pick_category(call: CallbackQuery, callback_data: PickCat, svc: Fin
         return
     op.category = cats[callback_data.idx].name
     await svc.save(op)
+    svc.pop_pending(callback_data.pid)
     learned = await svc.learn(op)
     text = f"✅ {svc.describe(op)}"
     if learned:
@@ -325,3 +398,18 @@ async def on_delete(call: CallbackQuery, callback_data: DelOp, svc: FinanceServi
 @router.message(F.text.startswith("/"))
 async def on_unknown_command(message: Message) -> None:
     await message.answer("Не знаю такой команды. Справка: /help")
+
+
+@router.error()
+async def on_error(event: ErrorEvent) -> bool:
+    """Любая ошибка (например, Google Sheets не ответил) — сообщить, а не молчать."""
+    log.error("Ошибка при обработке update %s", event.update.update_id, exc_info=event.exception)
+    text = "⚠️ Не получилось — скорее всего, Google Таблица не ответила. Попробуйте еще раз через минуту."
+    try:
+        if event.update.message:
+            await event.update.message.answer(text)
+        elif event.update.callback_query:
+            await event.update.callback_query.answer(text, show_alert=True)
+    except Exception:
+        log.exception("Не удалось сообщить об ошибке")
+    return True

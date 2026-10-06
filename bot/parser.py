@@ -32,6 +32,7 @@ class ParsedMessage:
     tags: list[str] = field(default_factory=list)
     account: str | None = None
     to_account: str | None = None
+    explicit_sign: bool = False  # был ли у суммы знак «+»/«-»
 
 
 def parse_date(token: str, today: date) -> date | None:
@@ -162,4 +163,5 @@ def parse_message(text: str, today: date, accounts: Sequence[str] = ()) -> Parse
         tags=list(dict.fromkeys(tags)),
         account=account,
         to_account=to_account,
+        explicit_sign=sign is not None,
     )

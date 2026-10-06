@@ -161,3 +161,41 @@ def test_row_from_sheet_serial_date():
     assert op.type == OpType.INCOME
     assert row_to_op(["", "расход", 1]) is None
     assert row_to_op(["2026-10-01", "непонятно", 1]) is None
+
+
+@pytest.fixture
+def svc_vuz():
+    from bot.categories import DEFAULT_CATEGORIES
+    import copy
+    cats = copy.deepcopy(DEFAULT_CATEGORIES)
+    for c in cats:
+        if c.name == "Прочее" and c.type == OpType.INCOME:
+            c.keywords += ["стипендия", "вуз"]
+    return FinanceService(MemoryStorage(categories=cats), today_fn=lambda: TODAY)
+
+
+def test_no_sign_income_keyword_becomes_income(svc_vuz):
+    p = run(svc_vuz.prepare("02.10 вуз 3104"))
+    assert p.op.type == OpType.INCOME and p.op.category == "Прочее"
+    assert not p.needs_category and p.type_choices is None
+    assert "Доход" in svc_vuz.describe(p.op)
+
+
+def test_explicit_minus_keeps_expense(svc_vuz):
+    p = run(svc_vuz.prepare("-3104 вуз"))
+    assert p.op.type == OpType.EXPENSE and p.needs_category
+
+
+def test_explicit_plus_income(svc_vuz):
+    p = run(svc_vuz.prepare("+3104 вуз"))
+    assert p.op.type == OpType.INCOME and p.op.category == "Прочее"
+
+
+def test_ambiguous_word_asks_type(svc_vuz):
+    p = run(svc_vuz.prepare("5000 подарок"))   # «Подарки» есть и в доходах, и в расходах
+    assert p.type_choices == {OpType.INCOME: "Подарки", OpType.EXPENSE: "Подарки"}
+
+
+def test_expense_keyword_stays_expense(svc_vuz):
+    p = run(svc_vuz.prepare("350 кофе"))
+    assert p.op.type == OpType.EXPENSE and p.op.category == "Еда вне дома"

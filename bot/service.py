@@ -25,6 +25,8 @@ PLAIN_AMOUNT_RE = re.compile(r"^(\d+(?:[.,]\d{1,2})?)(к|k)?(?:р|руб|₽|€
 class Prepared:
     op: Operation
     needs_category: bool
+    # Знака нет, а слово подходит и к доходной, и к расходной категории: спросить тип.
+    type_choices: dict[OpType, str] | None = None
 
 
 @dataclass
@@ -62,6 +64,7 @@ class FinanceService:
         self.cur = currency
         self._today_fn = today_fn
         self._pending: OrderedDict[str, Operation] = OrderedDict()
+        self._pending_choices: dict[str, dict[OpType, str]] = {}
         self._snapshots: dict[int, SnapshotSession] = {}
 
     def today(self) -> date:
@@ -85,21 +88,42 @@ class FinanceService:
         if op.type == OpType.TRANSFER:
             return Prepared(op, needs_category=False)
         categories = await self.storage.list_categories()
-        op.category = guess_category(op.comment, op.type, categories) or ""
+        if parsed.explicit_sign:
+            op.category = guess_category(op.comment, op.type, categories) or ""
+            return Prepared(op, needs_category=not op.category)
+        # Без знака: по умолчанию расход, но если слово знакомо только доходной категории — доход.
+        expense = guess_category(op.comment, OpType.EXPENSE, categories)
+        income = guess_category(op.comment, OpType.INCOME, categories)
+        if expense and income:
+            return Prepared(op, needs_category=False, type_choices={OpType.INCOME: income, OpType.EXPENSE: expense})
+        if income:
+            op.type, op.category = OpType.INCOME, income
+        else:
+            op.category = expense or ""
         return Prepared(op, needs_category=not op.category)
 
     async def save(self, op: Operation) -> Operation:
         await self.storage.add_operation(op)
         return op
 
-    def stash(self, op: Operation) -> str:
+    def stash(self, op: Operation, type_choices: dict[OpType, str] | None = None) -> str:
         self._pending[op.id] = op
+        if type_choices:
+            self._pending_choices[op.id] = type_choices
         while len(self._pending) > PENDING_LIMIT:
-            self._pending.popitem(last=False)
+            old, _ = self._pending.popitem(last=False)
+            self._pending_choices.pop(old, None)
         return op.id
 
     def pop_pending(self, pending_id: str) -> Operation | None:
+        self._pending_choices.pop(pending_id, None)
         return self._pending.pop(pending_id, None)
+
+    def pending_choices(self, pending_id: str) -> dict[OpType, str] | None:
+        return self._pending_choices.get(pending_id)
+
+    def get_pending(self, pending_id: str) -> Operation | None:
+        return self._pending.get(pending_id)
 
     async def categories_for(self, op_type: OpType) -> list[Category]:
         return [c for c in await self.storage.list_categories() if c.type == op_type]
