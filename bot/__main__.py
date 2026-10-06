@@ -25,6 +25,8 @@ COMMANDS = [
     BotCommand(command="undo", description="Удалить последнюю операцию"),
     BotCommand(command="capital", description="Остатки по счетам и динамика"),
     BotCommand(command="snapshot", description="Внеплановый опрос остатков по счетам"),
+    BotCommand(command="compare", description="Сравнить два месяца: /compare август сентябрь"),
+    BotCommand(command="big", description="Разовые траты за год"),
     BotCommand(command="categories", description="Категории"),
     BotCommand(command="refresh", description="Перечитать таблицу"),
     BotCommand(command="help", description="Справка"),

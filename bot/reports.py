@@ -166,14 +166,14 @@ def _share(part: Decimal, total: Decimal) -> str:
     return fmt_percent(part / total * 100) if total > 0 else "—"
 
 
-def compare_to_average(current: Decimal, avg: Decimal | None, cur: str = "") -> str:
+def compare_to_average(current: Decimal, avg: Decimal | None, cur: str = "", near: str = "≈ среднее") -> str:
     """«⬆️ +12%», «⬇️ −20%», «≈ среднее», «⬆️ +11 400 (×115)», «🆕»."""
     if avg is None or avg <= 0:
         return "🆕" if current > 0 else ""
     ratio = current / avg
     pct = (ratio - 1) * 100
     if abs(pct) < NEAR_AVERAGE_PCT:
-        return "≈ среднее"
+        return near
     arrow = "⬆️" if pct > 0 else "⬇️"
     if ratio >= MULTIPLIER_FROM:
         mult = f"{ratio:.0f}" if ratio >= 10 else f"{ratio:.1f}".replace(".", ",")
@@ -360,12 +360,69 @@ def format_category_report(
         lines.append(f"{fmt_short_date(op.date)} · {fmt_money(op.amount, cur)}{comment}")
     if len(current) > max_items:
         lines.append(f"… и еще {len(current) - max_items}")
-    hist = []
+    hist, counted = [], []
     for i in range(1, history_months + 1):
         m = add_months(first, -i)
         amount = sum((op.amount for op in in_cat if m <= op.date <= month_end(m)), ZERO)
         hist.append(f"{MONTHS_SHORT[m.month - 1]} {m.year}: {fmt_money(amount, cur)}")
+        if any(m <= op.date <= month_end(m) for op in ops):   # месяцы без операций в среднее не идут
+            counted.append(amount)
     lines += ["", "<b>Прошлые месяцы:</b>", *hist]
+    if counted:
+        avg = sum(counted, ZERO) / len(counted)
+        lines.append(f"Среднее за {len(counted)} мес.: <b>{fmt_money(avg.quantize(Decimal(1)), cur)}</b> в месяц")
+    return "\n".join(lines)
+
+
+# ---------- сравнение двух месяцев ----------
+
+def format_compare(ops: Sequence[Operation], m1: date, m2: date, cur: str = "", icons: Icons | None = None) -> str:
+    a, b = summarize_month(ops, m1), summarize_month(ops, m2)
+    chg = lambda x, y: compare_to_average(y, x, cur, near="≈ без изменений") if x > 0 else ("🆕" if y > 0 else "")  # noqa: E731
+
+    def row(label: str, x: Decimal, y: Decimal, signed: bool = False) -> str:
+        return f"{label}: {fmt_money(x, cur, signed=signed)} → <b>{fmt_money(y, cur, signed=signed)}</b>  {chg(x, y)}".rstrip()
+
+    lines = [
+        f"⚖️ <b>{month_title(m1).capitalize()} → {month_title(m2)}</b>", "",
+        row("💰 Доход", a.income, b.income),
+        row("💸 Расход", a.expense, b.expense),
+        f"Сальдо: {fmt_money(a.balance, cur, signed=True)} → <b>{fmt_money(b.balance, cur, signed=True)}</b>",
+    ]
+    for title, op_type, xs, ys in (
+        ("💸 Расходы", OpType.EXPENSE, dict(a.expense_by_category), dict(b.expense_by_category)),
+        ("💰 Доходы", OpType.INCOME, dict(a.income_by_category), dict(b.income_by_category)),
+    ):
+        names = sorted(set(xs) | set(ys), key=lambda n: (-max(xs.get(n, ZERO), ys.get(n, ZERO)), n))
+        if not names:
+            continue
+        lines += ["", f"<b>{title}</b>"]
+        for n in names:
+            x, y = xs.get(n, ZERO), ys.get(n, ZERO)
+            mark = chg(x, y) if y > 0 else "⬇️ не было"
+            lines.append(f"{_icon(icons, op_type, n)}{html.escape(n)}: {fmt_money(x, cur)} → {fmt_money(y, cur)}  {mark}".rstrip())
+    if not (a.count or b.count):
+        lines += ["", "За эти месяцы операций нет."]
+    return "\n".join(lines)
+
+
+# ---------- разовые траты за год ----------
+
+def format_big(bigs: Sequence[BigPurchase], ops: Sequence[Operation], today: date, cur: str = "", limit: int = 30) -> str:
+    start = add_months(month_start(today), -11)
+    items = sorted((b for b in bigs if start <= b.date <= today), key=lambda b: b.date, reverse=True)
+    total = sum((b.amount for b in items), ZERO)
+    expense = summarize(ops, start, today).expense
+    head = f"🧾 <b>Разовые траты</b> с {MONTHS_SHORT[start.month - 1]} {start.year}: <b>{fmt_money(total, cur)}</b>"
+    if expense > 0 and total > 0:
+        head += f" · {fmt_percent(total / expense * 100)} всех расходов"
+    lines = [head]
+    if not items:
+        lines.append("Пока нет. Крупные покупки записываются в лист «Большие покупки» (Дата, Что купил, Стоимость).")
+    for b in items[:limit]:
+        lines.append(f"• {fmt_date(b.date)} {html.escape(b.what) or 'покупка'} — {fmt_money(b.amount, cur)}")
+    if len(items) > limit:
+        lines.append(f"… и еще {len(items) - limit}")
     return "\n".join(lines)
 
 

@@ -182,3 +182,9 @@ def test_fallback_job_sends_once(h):
     asyncio.run(monthly_fallback_job(h.bot, h.svc, frozenset({1})))
     sent = [m for m in h.session.sent[n:] if "итоги месяца" in (getattr(m, "text", "") or "")]
     assert len(sent) == 1
+
+
+def test_russian_aliases(h):
+    assert "⚖️" in texts(h.text("/сравнить август сентябрь"))[0]
+    assert "🧾" in texts(h.text("/крупные"))[0]
+    assert "💼" in texts(h.text("/деньги"))[0]

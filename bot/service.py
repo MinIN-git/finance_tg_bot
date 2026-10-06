@@ -238,6 +238,34 @@ class FinanceService:
         icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
         return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
 
+    async def compare_text(self, args: str | None) -> str:
+        from .import_budget import parse_month_label
+
+        today = self.today()
+        if not args:
+            m2 = reports.add_months(today, -1)
+            m1 = reports.add_months(today, -2)
+        else:
+            tokens = args.split()
+            labels: list[str] = []
+            for t in tokens:   # «сентябрь 2025» — год приклеивается к месяцу
+                if labels and t.isdigit() and len(t) == 4:
+                    labels[-1] += f" {t}"
+                else:
+                    labels.append(t)
+            months = [parse_month_label(lbl, today) for lbl in labels]
+            if len(months) != 2 or None in months:
+                return ("Укажите два месяца: <code>/compare август сентябрь</code> "
+                        "или <code>/compare 08.2026 09.2026</code>")
+            m1, m2 = months
+        await self._categories()
+        return reports.format_compare(await self.storage.list_operations(), m1, m2, self.cur, self._icons)
+
+    async def big_text(self) -> str:
+        return reports.format_big(
+            await self.storage.list_big_purchases(), await self.storage.list_operations(), self.today(), self.cur,
+        )
+
     async def month_close_text(self, month: date | None = None) -> str:
         """Итоги месяца (по умолчанию — прошлого): операции, разовые траты, капитал и сверка."""
         month = reports.month_start(month or reports.add_months(self.today(), -1))

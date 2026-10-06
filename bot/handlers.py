@@ -43,6 +43,8 @@ HELP = """<b>Как записывать</b>
 /undo — удалить последнюю добавленную
 /capital — остатки по счетам и динамика за 1/3/6/12 мес.
 /snapshot — внеплановый опрос остатков по счетам (/деньги)
+/compare август сентябрь — сравнить два месяца (/сравнить)
+/big — разовые траты за год и их доля (/крупные)
 /categories — категории и ключевые слова
 /refresh — перечитать таблицу после ручных правок"""
 
@@ -186,6 +188,16 @@ async def cmd_cat(message: Message, command: CommandObject, svc: FinanceService)
         await message.answer("Укажите категорию: <code>/cat продукты</code>. Список: /categories")
         return
     await message.answer(await svc.category_text(command.args))
+
+
+@router.message(Command("compare", "сравнить"))
+async def cmd_compare(message: Message, command: CommandObject, svc: FinanceService) -> None:
+    await message.answer(await svc.compare_text(command.args))
+
+
+@router.message(Command("big", "крупные"))
+async def cmd_big(message: Message, svc: FinanceService) -> None:
+    await message.answer(await svc.big_text())
 
 
 @router.message(Command("categories"))
