@@ -10,7 +10,7 @@ from typing import Iterable, Mapping, Sequence
 
 from .models import BalanceEntry, BigPurchase, Operation, OpType
 from .textutil import (
-    MONTHS_DATIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_money, fmt_percent, fmt_short_date, month_title,
+    MONTHS_DATIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_date, fmt_money, fmt_percent, fmt_short_date, month_title,
 )
 
 ZERO = Decimal(0)
@@ -261,9 +261,15 @@ def format_period(title: str, s: Summary, cur: str = "", icons: Icons | None = N
     return "\n".join(lines)
 
 
-def format_month(s: Summary, today: date, cur: str = "", icons: Icons | None = None) -> str:
+def format_month(s: Summary, today: date, cur: str = "", icons: Icons | None = None, pace: str = "") -> str:
     title = f"📅 {month_title(s.start).capitalize()} · 1–{today.day} {MONTHS_SHORT[today.month - 1]}"
-    return format_period(title, s, cur, icons)
+    text = format_period(title, s, cur, icons)
+    if pace:
+        head, _, rest = text.partition("\n\n")
+        lines = rest.split("\n")
+        # темп — сразу после строк доход/расход/сальдо
+        text = "\n".join([head, "", *lines[:3], pace, *lines[3:]])
+    return text
 
 
 def format_week(s: Summary, cur: str = "", icons: Icons | None = None) -> str:
@@ -444,7 +450,12 @@ def capital_summary(
     return s
 
 
-def format_capital(s: CapitalSummary | None, cur: str = "") -> str:
+def format_capital(
+    s: CapitalSummary | None,
+    cur: str = "",
+    history: Sequence[tuple[date, Decimal]] = (),
+    safety: Decimal | None = None,
+) -> str:
     if s is None:
         return "Остатков пока нет. Пройдите опрос по счетам: /snapshot"
     m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
@@ -464,10 +475,59 @@ def format_capital(s: CapitalSummary | None, cur: str = "") -> str:
     if s.unaccounted is not None:
         lines.append(f"Не учтено: <b>{m(s.unaccounted, True)}</b> <i>(проценты, забытые траты)</i>")
     if s.dynamics:
-        lines.append("Динамика: " + " · ".join(f"за {n} мес {m(v, True)}" for n, v in s.dynamics))
+        lines.append("📈 Рост: " + " · ".join(f"за {n} мес {m(v, True)}" for n, v in s.dynamics))
     elif s.prev_date is None:
         lines.append("Это первый снимок — сравнение появится со следующего.")
+    if safety is not None:
+        lines.append(f"🛟 Запас прочности: <b>{safety:.1f}</b> мес. обычных расходов (без разовых)".replace(".", ",", 1))
+    if len(history) > 1:
+        lines += ["", "<b>Снимки по месяцам:</b>"]
+        rows = list(history)[-12:]
+        for i in range(len(rows) - 1, -1, -1):
+            d, total = rows[i]
+            delta = f" ({m(total - rows[i - 1][1], True)})" if i > 0 else ""
+            lines.append(f"{fmt_date(d)} — {m(total)}{delta}")
     return "\n".join(lines)
+
+
+def snapshot_totals(entries: Iterable[BalanceEntry]) -> list[tuple[date, Decimal]]:
+    """Итог по каждому снимку (по возрастанию даты)."""
+    return [(d, sum(snap.values(), ZERO)) for d, snap in group_snapshots(entries)]
+
+
+def avg_monthly_expense_wo_big(
+    ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date, window: int = 3,
+) -> Decimal | None:
+    """Средний месячный расход без разовых за `window` прошлых полных месяцев (месяцы без операций не считаются)."""
+    values = []
+    for i in range(1, window + 1):
+        m = add_months(month_start(today), -i)
+        s = summarize_month(ops, m)
+        if s.count:
+            values.append(max(s.expense - big_total(bigs, m, month_end(m)), ZERO))
+    return sum(values, ZERO) / len(values) if values else None
+
+
+def safety_months(total: Decimal, ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date) -> Decimal | None:
+    avg = avg_monthly_expense_wo_big(ops, bigs, today)
+    return total / avg if avg else None
+
+
+def month_pace(ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date) -> tuple[Decimal, Decimal | None]:
+    """(потрачено с начала месяца без разовых, сколько обычно уходит к этому дню).
+    «Обычно» — средний расход без разовых за 3 прошлых полных месяца пропорционально дню месяца."""
+    first = month_start(today)
+    spent = summarize(ops, first, today).expense - big_total(bigs, first, today)
+    avg = avg_monthly_expense_wo_big(ops, bigs, today)
+    expected = avg * today.day / month_end(today).day if avg is not None else None
+    return max(spent, ZERO), expected
+
+
+def format_pace(spent: Decimal, expected: Decimal | None, today: date, cur: str = "") -> str:
+    head = f"⏱ <b>Темп</b>: потрачено {fmt_money(spent, cur)} (без разовых) к {today.day}-му числу"
+    if expected is None:
+        return head
+    return f"{head}; обычно к этому дню ≈ {fmt_money(expected.quantize(Decimal(1)), cur)}  {compare_to_average(spent, expected, cur)}".rstrip()
 
 
 # ---------- итоги месяца (отчет 1 числа) ----------

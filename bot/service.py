@@ -216,7 +216,9 @@ class FinanceService:
         ops = await self.storage.list_operations()
         s = reports.summarize(ops, reports.month_start(today), today)
         await self._categories()
-        return reports.format_month(s, today, self.cur, self._icons)
+        spent, expected = reports.month_pace(ops, await self.storage.list_big_purchases(), today)
+        pace = reports.format_pace(spent, expected, today, self.cur)
+        return reports.format_month(s, today, self.cur, self._icons, pace=pace)
 
     async def week_text(self) -> str:
         today = self.today()
@@ -312,10 +314,13 @@ class FinanceService:
 
     async def capital_text(self) -> str:
         accounts = [a.name for a in await self.storage.list_accounts()]
-        summary = reports.capital_summary(
-            await self.storage.list_balances(), await self.storage.list_operations(), accounts
-        )
-        return reports.format_capital(summary, self.cur)
+        balances = await self.storage.list_balances()
+        ops = await self.storage.list_operations()
+        summary = reports.capital_summary(balances, ops, accounts)
+        safety = None
+        if summary is not None:
+            safety = reports.safety_months(summary.total, ops, await self.storage.list_big_purchases(), self.today())
+        return reports.format_capital(summary, self.cur, reports.snapshot_totals(balances), safety)
 
 
 def parse_plain_amount(text: str) -> Decimal | None:
