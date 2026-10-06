@@ -99,11 +99,11 @@ def test_vuz_without_plus_is_income(h):
 def test_unknown_word_toggle_to_income(h):
     out = h.text("500 абырвалг")
     kb = buttons(out)
-    assert "🔄 Это доход" in kb and "Ипотека" in kb
+    assert "🔄 Это доход" in kb and "🏦 Ипотека" in kb
     out = h.click(kb["🔄 Это доход"])
     kb = buttons(out)
-    assert "Зарплата" in kb and "Ипотека" not in kb and "🔄 Это расход" in kb
-    out = h.click(kb["Зарплата"])
+    assert "💼 Зарплата" in kb and "🏦 Ипотека" not in kb and "🔄 Это расход" in kb
+    out = h.click(kb["💼 Зарплата"])
     assert "🟢 Доход" in texts(out)[0]
     assert ops(h)[0].type == OpType.INCOME
     # слово запомнилось за доходной категорией
@@ -113,8 +113,8 @@ def test_unknown_word_toggle_to_income(h):
 
 def test_ambiguous_word_asks_income_or_expense(h):
     kb = buttons(h.text("5000 подарок"))
-    assert set(kb) == {"🟢 Доход · Подарки", "🔴 Расход · Подарки", "✖️ Не записывать"}
-    out = h.click(kb["🟢 Доход · Подарки"])
+    assert set(kb) == {"🟢 Доход · 🎁 Подарки", "🔴 Расход · 🎁 Подарки", "✖️ Не записывать"}
+    out = h.click(kb["🟢 Доход · 🎁 Подарки"])
     assert "🟢 Доход" in texts(out)[0]
     assert ops(h)[0].type == OpType.INCOME
 
@@ -142,13 +142,20 @@ def test_storage_error_reports_and_keeps_pending(h):
         raise RuntimeError("Sheets API 503")
 
     storage.add_operation = broken
-    out = h.click(kb["Досуг"])
+    out = h.click(kb["🎭 Досуг"])
     assert any("Не получилось" in (getattr(m, "text", "") or "") for m in out)
     storage.add_operation = real_add
-    out = h.click(kb["Досуг"])      # повторное нажатие срабатывает: операция не потерялась
+    out = h.click(kb["🎭 Досуг"])      # повторное нажатие срабатывает: операция не потерялась
     assert "✅" in texts(out)[0]
     assert len(ops(h)) == 1
 
     storage.add_operation = broken
     out = h.text("350 кофе")
     assert any("Не получилось" in t for t in texts(out))
+
+
+def test_emoji_in_saved_reply_and_last(h):
+    out = h.text("350 кофе")
+    assert "🍽 Еда вне дома" in texts(out)[0]
+    out = h.text("/last")
+    assert "🍽 Еда вне дома" in texts(out)[0]

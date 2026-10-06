@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from .models import BalanceEntry, Operation, OpType
 from .textutil import (
@@ -114,7 +114,8 @@ class MonthlyReport:
     avg_months: list[date]          # первые числа месяцев, по которым считалось среднее
     avg_income: Decimal | None
     avg_expense: Decimal | None
-    avg_by_category: dict[str, Decimal]
+    avg_by_category: dict[str, Decimal]            # расходы
+    avg_income_by_category: dict[str, Decimal] = field(default_factory=dict)
 
 
 def monthly_report(ops: Sequence[Operation], month: date, avg_window: int = 3) -> MonthlyReport:
@@ -131,104 +132,189 @@ def monthly_report(ops: Sequence[Operation], month: date, avg_window: int = 3) -
         return MonthlyReport(summary, [], None, None, {})
     n = Decimal(len(prev))
     by_cat: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    inc_cat: dict[str, Decimal] = defaultdict(lambda: ZERO)
     for p in prev:
         for name, amount in p.expense_by_category:
             by_cat[name] += amount
+        for name, amount in p.income_by_category:
+            inc_cat[name] += amount
     return MonthlyReport(
         summary=summary,
         avg_months=sorted(p.start for p in prev),
         avg_income=sum((p.income for p in prev), ZERO) / n,
         avg_expense=sum((p.expense for p in prev), ZERO) / n,
         avg_by_category={k: v / n for k, v in by_cat.items()},
+        avg_income_by_category={k: v / n for k, v in inc_cat.items()},
     )
 
 
-def _delta_pct(current: Decimal, base: Decimal) -> str:
-    if base == 0:
-        return ""
-    pct = (current - base) / base * 100
-    sign = "+" if pct > 0 else ("−" if pct < 0 else "±")
-    return f" ({sign}{abs(round(pct))}%)"
+# ---------- форматирование ----------
+
+HIDDEN_TAGS = {"импорт"}           # служебные теги в отчетах не показываем
+NEAR_AVERAGE_PCT = 3               # |отклонение| меньше — «≈ среднее»
+MULTIPLIER_FROM = 3                # с ×3 вместо процентов показываем разницу в деньгах и множитель
+
+Icons = Mapping[tuple[OpType, str], str]
+
+
+def _icon(icons: Icons | None, op_type: OpType, name: str) -> str:
+    emoji = (icons or {}).get((op_type, name), "")
+    return f"{emoji} " if emoji else ""
 
 
 def _share(part: Decimal, total: Decimal) -> str:
     return fmt_percent(part / total * 100) if total > 0 else "—"
 
 
-# ---------- форматирование ----------
+def compare_to_average(current: Decimal, avg: Decimal | None, cur: str = "") -> str:
+    """«⬆️ +12%», «⬇️ −20%», «≈ среднее», «⬆️ +11 400 (×115)», «🆕»."""
+    if avg is None or avg <= 0:
+        return "🆕" if current > 0 else ""
+    ratio = current / avg
+    pct = (ratio - 1) * 100
+    if abs(pct) < NEAR_AVERAGE_PCT:
+        return "≈ среднее"
+    arrow = "⬆️" if pct > 0 else "⬇️"
+    if ratio >= MULTIPLIER_FROM:
+        mult = f"{ratio:.0f}" if ratio >= 10 else f"{ratio:.1f}".replace(".", ",")
+        return f"{arrow} {fmt_money(current - avg, cur, signed=True)} (×{mult})"
+    sign = "+" if pct > 0 else "−"
+    return f"{arrow} {sign}{abs(round(pct))}%"
 
-def format_totals(s: Summary, cur: str = "") -> list[str]:
-    lines = [
-        f"Доход: <b>{fmt_money(s.income, cur)}</b>",
-        f"Расход: <b>{fmt_money(s.expense, cur)}</b>",
-        f"Остаток: <b>{fmt_money(s.balance, cur)}</b>",
-    ]
+
+def _balance_line(s: Summary, cur: str) -> str:
+    mark = "🟢" if s.balance >= 0 else "🔴"
+    line = f"{mark} Остаток: <b>{fmt_money(s.balance, cur, signed=True)}</b>"
     if s.savings_rate is not None:
-        lines.append(f"Сбережения: <b>{fmt_percent(s.savings_rate)}</b>")
-    return lines
+        line += f" · сбережения {fmt_percent(s.savings_rate)}"
+    return line
 
 
-def format_categories(items: Sequence[tuple[str, Decimal]], total: Decimal, limit: int | None, cur: str = "") -> list[str]:
-    shown = items[:limit] if limit else items
+def format_totals(s: Summary, cur: str = "", r: MonthlyReport | None = None) -> list[str]:
+    inc_cmp = exp_cmp = ""
+    if r is not None and r.avg_months:
+        inc_cmp = f"  {compare_to_average(s.income, r.avg_income, cur)}"
+        exp_cmp = f"  {compare_to_average(s.expense, r.avg_expense, cur)}"
     return [
-        f"{i}. {html.escape(name)} — {fmt_money(amount, cur)} ({_share(amount, total)})"
-        for i, (name, amount) in enumerate(shown, 1)
+        f"💰 Доход: <b>{fmt_money(s.income, cur)}</b>{inc_cmp}",
+        f"💸 Расход: <b>{fmt_money(s.expense, cur)}</b>{exp_cmp}",
+        _balance_line(s, cur),
     ]
+
+
+def format_categories(
+    items: Sequence[tuple[str, Decimal]],
+    total: Decimal,
+    op_type: OpType,
+    cur: str = "",
+    icons: Icons | None = None,
+    averages: Mapping[str, Decimal] | None = None,
+) -> list[str]:
+    """Все ненулевые категории по убыванию: «🛒 Продукты домой — 12 000 · 35%  ⬆️ +10%»."""
+    lines = []
+    for name, amount in items:
+        if amount <= 0:
+            continue
+        line = f"{_icon(icons, op_type, name)}{html.escape(name)} — {fmt_money(amount, cur)} · {_share(amount, total)}"
+        if averages is not None:
+            line += f"  {compare_to_average(amount, averages.get(name), cur)}"
+        lines.append(line.rstrip())
+    return lines
 
 
 def format_tags(s: Summary, cur: str = "") -> list[str]:
     lines = []
     for tag, st in s.tags.items():
+        if tag in HIDDEN_TAGS:
+            continue
         parts = []
         if st.expense:
             parts.append(f"расход {fmt_money(st.expense, cur)}")
         if st.income:
             parts.append(f"доход {fmt_money(st.income, cur)}")
-        lines.append(f"#{html.escape(tag)}: {', '.join(parts)} · {st.count} оп.")
+        lines.append(f"🏷 #{html.escape(tag)}: {', '.join(parts)} · {st.count} оп.")
     return lines
 
 
-def format_period(title: str, s: Summary, cur: str = "", top: int | None = 10) -> str:
-    lines = [f"<b>{title}</b>", *format_totals(s, cur)]
+def _sections(s: Summary, cur: str, icons: Icons | None, r: MonthlyReport | None = None) -> list[str]:
+    lines: list[str] = []
     if s.expense_by_category:
-        lines += ["", "<b>Расходы по категориям:</b>", *format_categories(s.expense_by_category, s.expense, top, cur)]
-    if s.tags:
-        lines += ["", "<b>Теги:</b>", *format_tags(s, cur)]
+        lines += ["", "<b>💸 Расходы</b>", *format_categories(
+            s.expense_by_category, s.expense, OpType.EXPENSE, cur, icons,
+            r.avg_by_category if r and r.avg_months else None,
+        )]
+    if s.income_by_category:
+        lines += ["", "<b>💰 Доходы</b>", *format_categories(
+            s.income_by_category, s.income, OpType.INCOME, cur, icons,
+            r.avg_income_by_category if r and r.avg_months else None,
+        )]
+    tags = format_tags(s, cur)
+    if tags:
+        lines += ["", "<b>Теги</b>", *tags]
+    return lines
+
+
+def format_period(title: str, s: Summary, cur: str = "", icons: Icons | None = None) -> str:
+    lines = [f"<b>{title}</b>", "", *format_totals(s, cur), *_sections(s, cur, icons)]
     if s.count == 0:
         lines += ["", "Операций пока нет."]
     return "\n".join(lines)
 
 
-def format_month(s: Summary, today: date, cur: str = "") -> str:
-    title = f"📅 {month_title(s.start).capitalize()} (1–{today.day} {MONTHS_SHORT[today.month - 1]})"
-    return format_period(title, s, cur)
+def format_month(s: Summary, today: date, cur: str = "", icons: Icons | None = None) -> str:
+    title = f"📅 {month_title(s.start).capitalize()} · 1–{today.day} {MONTHS_SHORT[today.month - 1]}"
+    return format_period(title, s, cur, icons)
 
 
-def format_week(s: Summary, cur: str = "") -> str:
+def format_week(s: Summary, cur: str = "", icons: Icons | None = None) -> str:
     title = f"🗓 Неделя {fmt_short_date(s.start)}–{fmt_short_date(s.end)}"
-    return format_period(title, s, cur)
+    return format_period(title, s, cur, icons)
 
 
-def format_monthly_report(r: MonthlyReport, cur: str = "") -> str:
+def report_conclusion(r: MonthlyReport, cur: str = "", icons: Icons | None = None) -> str:
+    """Короткий вывод в одну строку."""
     s = r.summary
-    lines = [f"📊 <b>Отчет за {month_title(s.start)}</b>", *format_totals(s, cur)]
+    if s.balance >= 0:
+        rate = f", отложено {fmt_percent(s.savings_rate)} дохода" if s.savings_rate is not None else ""
+        parts = [f"месяц в плюсе на {fmt_money(s.balance, cur)}{rate}"]
+    else:
+        parts = [f"расходы превысили доходы на {fmt_money(-s.balance, cur)}"]
+    if r.avg_months and r.avg_expense:
+        pct = round((s.expense - r.avg_expense) / r.avg_expense * 100)
+        ratio = s.expense / r.avg_expense
+        if ratio >= MULTIPLIER_FROM:
+            mult = f"{ratio:.0f}" if ratio >= 10 else f"{ratio:.1f}".replace(".", ",")
+            parts.append(f"траты в {mult} раза выше среднего")
+        elif abs(pct) >= NEAR_AVERAGE_PCT:
+            parts.append(f"траты {'выше' if pct > 0 else 'ниже'} среднего на {abs(pct)}%")
+        growth = [
+            (amount - r.avg_by_category.get(name, ZERO), name)
+            for name, amount in s.expense_by_category
+        ]
+        if growth:
+            diff, name = max(growth)
+            if diff > 0 and pct > 0:
+                parts.append(
+                    f"сильнее всего выросли {_icon(icons, OpType.EXPENSE, name)}{html.escape(name)} "
+                    f"({fmt_money(diff, cur, signed=True)})"
+                )
+    text = "; ".join(parts)
+    return f"💬 {text[0].upper()}{text[1:]}."
+
+
+def format_monthly_report(r: MonthlyReport, cur: str = "", icons: Icons | None = None) -> str:
+    s = r.summary
+    lines = [f"📊 <b>{month_title(s.start).capitalize()}</b> — итоги месяца", "", *format_totals(s, cur, r)]
     if s.count == 0:
         lines += ["", "За этот месяц операций нет."]
-    if s.expense_by_category:
-        lines += ["", "<b>Топ-5 расходов:</b>", *format_categories(s.expense_by_category, s.expense, 5, cur)]
+        return "\n".join(lines)
     if r.avg_months:
         months = ", ".join(MONTHS_SHORT[m.month - 1] for m in r.avg_months)
-        lines += ["", f"<b>Сравнение со средним</b> ({len(r.avg_months)} мес.: {months}):"]
-        lines.append(f"Расход: {fmt_money(s.expense, cur)} vs {fmt_money(r.avg_expense, cur)}{_delta_pct(s.expense, r.avg_expense)}")
-        lines.append(f"Доход: {fmt_money(s.income, cur)} vs {fmt_money(r.avg_income, cur)}{_delta_pct(s.income, r.avg_income)}")
-        for name, amount in s.expense_by_category[:5]:
-            avg = r.avg_by_category.get(name)
-            if avg:
-                lines.append(f"· {html.escape(name)}: {fmt_money(amount, cur)} vs {fmt_money(avg, cur)}{_delta_pct(amount, avg)}")
-    else:
+        lines.append(f"<i>Сравнение — со средним за {len(r.avg_months)} мес. ({months})</i>")
+    lines += _sections(s, cur, icons, r)
+    if not r.avg_months:
         lines += ["", "Для сравнения со средним пока мало данных."]
-    if s.tags:
-        lines += ["", "<b>Теги:</b>", *format_tags(s, cur)]
+    lines += ["", report_conclusion(r, cur, icons)]
     return "\n".join(lines)
 
 
@@ -239,12 +325,14 @@ def format_category_report(
     cur: str = "",
     history_months: int = 3,
     max_items: int = 20,
+    icon: str = "",
 ) -> str:
     first = month_start(today)
     in_cat = [op for op in ops if op.category == name and op.type != OpType.TRANSFER]
     current = sorted((op for op in in_cat if first <= op.date <= today), key=lambda o: o.date, reverse=True)
     total = sum((op.amount for op in current), ZERO)
-    lines = [f"🏷 <b>{html.escape(name)}</b> — {month_title(first)}", f"Итого: <b>{fmt_money(total, cur)}</b> ({len(current)} оп.)"]
+    head = f"{icon} " if icon else "🏷 "
+    lines = [f"{head}<b>{html.escape(name)}</b> — {month_title(first)}", f"Итого: <b>{fmt_money(total, cur)}</b> ({len(current)} оп.)"]
     for op in current[:max_items]:
         comment = f" {html.escape(op.comment)}" if op.comment else ""
         lines.append(f"{fmt_short_date(op.date)} · {fmt_money(op.amount, cur)}{comment}")

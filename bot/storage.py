@@ -30,7 +30,7 @@ SHEET_BALANCES = "Остатки"
 HEADERS = {
     SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id"],
     SHEET_ACCOUNTS: ["Название", "Вопрос для ежемесячного снимка"],
-    SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова"],
+    SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
 }
 
@@ -250,11 +250,31 @@ class SheetsStorage(Storage):
             ws = self._sh.add_worksheet(title=title, rows=1000, cols=len(header))
             rows: list[list[Any]] = [header]
             if title == SHEET_CATEGORIES:
-                rows += [[c.name, c.type.value, ", ".join(c.keywords)] for c in DEFAULT_CATEGORIES]
+                rows += [[c.name, c.type.value, ", ".join(c.keywords), c.emoji] for c in DEFAULT_CATEGORIES]
             elif title == SHEET_ACCOUNTS:
                 rows += [[a.name, a.question] for a in DEFAULT_ACCOUNTS]
             ws.update(rows, "A1", value_input_option="USER_ENTERED")
             ws.freeze(rows=1)
+        if SHEET_CATEGORIES in existing:
+            self._add_emoji_column()
+
+    def _add_emoji_column(self) -> None:
+        """Для листа «Категории», созданного старой версией: дописать колонку «Эмодзи» с эмодзи
+        по умолчанию. Если колонка уже есть, ничего не меняет (правки пользователя сохраняются)."""
+        ws = self._ws(SHEET_CATEGORIES)
+        rows = ws.get_all_values()
+        if not rows or (len(rows[0]) > 3 and str(rows[0][3]).strip()):
+            return
+        defaults = {(c.name, c.type.value): c.emoji for c in DEFAULT_CATEGORIES}
+        column = [["Эмодзи"]]
+        for r in rows[1:]:
+            r = list(r) + ["", "", "", ""]
+            current = str(r[3]).strip()
+            column.append([current or defaults.get((str(r[0]).strip(), str(r[1]).strip().lower()), "")])
+        if ws.col_count < 4:
+            ws.add_cols(4 - ws.col_count)
+        log.info("Добавляю колонку «Эмодзи» в лист «Категории»")
+        ws.update(column, f"D1:D{len(column)}", value_input_option="RAW")
 
     def _ws(self, title: str):
         return self._sh.worksheet(title)
@@ -378,7 +398,7 @@ class SheetsStorage(Storage):
             rows = await self._run(self._read, SHEET_CATEGORIES)
             cats = []
             for r in rows:
-                r = list(r) + ["", "", ""]
+                r = list(r) + ["", "", "", ""]
                 name = str(r[0]).strip()
                 try:
                     op_type = OpType(str(r[1]).strip().lower())
@@ -386,7 +406,7 @@ class SheetsStorage(Storage):
                     continue
                 if name:
                     kws = [k.strip() for k in str(r[2]).split(",") if k.strip()]
-                    cats.append(Category(name, op_type, kws))
+                    cats.append(Category(name, op_type, kws, str(r[3]).strip()))
             self._cats = cats
         return copy.deepcopy(self._cats)
 

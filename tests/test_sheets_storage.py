@@ -32,10 +32,14 @@ def a1_row(label):
 class FakeWorksheet:
     _ids = iter(range(1, 1000))
 
-    def __init__(self, title):
+    def __init__(self, title, cols=26):
         self.title = title
         self.id = next(self._ids)
         self.rows = []
+        self.col_count = cols
+
+    def add_cols(self, n):
+        self.col_count += n
 
     def get_all_values(self, **kwargs):
         return [list(r) for r in self.rows]
@@ -49,10 +53,14 @@ class FakeWorksheet:
 
     def update(self, values, range_name, value_input_option=None):
         start = a1_row(range_name)
+        col = ord(range_name[0]) - ord("A")
+        assert col + max(len(r) for r in values) <= self.col_count, "exceeds grid limits"
         for i, row in enumerate(values):
             while len(self.rows) < start + i:
                 self.rows.append([])
-            self.rows[start + i - 1] = [user_entered(v) for v in row]
+            target = self.rows[start + i - 1]
+            target.extend([""] * (col + len(row) - len(target)))
+            target[col:col + len(row)] = [user_entered(v) for v in row]
 
     def update_acell(self, label, value):
         col = ord(label[0]) - ord("A")
@@ -81,7 +89,7 @@ class FakeSpreadsheet:
         return self.sheets[title]
 
     def add_worksheet(self, title, rows, cols):
-        self.sheets[title] = FakeWorksheet(title)
+        self.sheets[title] = FakeWorksheet(title, cols)
         return self.sheets[title]
 
     def batch_update(self, body):
@@ -185,3 +193,24 @@ def test_read_grid(storage):
     storage._sh.sheets["Лист1"].rows = [["Сентябрь", ""], ["Доходы", "Сумма"]]
     formatted, raw = storage.read_grid("Лист1")
     assert formatted[1] == ["Доходы", "Сумма"]
+
+
+def test_emoji_column_added_to_old_categories_sheet(monkeypatch):
+    import gspread
+
+    client = FakeClient()
+    old = client.sh.add_worksheet("Категории", 1000, 3)       # лист старой версии: 3 колонки
+    old.rows = [["Название", "Тип", "Ключевые слова"],
+                ["Еда вне дома", "расход", "кофе"],
+                ["Своя категория", "расход", ""],
+                ["Зарплата", "доход", "зп"]]
+    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
+    s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
+    s.ensure_sheets()
+    assert [r[3] for r in old.rows] == ["Эмодзи", "🍽", "", "💼"]
+    cats = {c.name: c for c in run(s.list_categories())}
+    assert cats["Еда вне дома"].emoji == "🍽" and cats["Еда вне дома"].label == "🍽 Еда вне дома"
+
+    old.rows[1][3] = "☕"                                      # правка пользователя
+    s.ensure_sheets()                                         # повторный запуск колонку не трогает
+    assert old.rows[1][3] == "☕"

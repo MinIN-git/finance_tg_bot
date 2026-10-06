@@ -31,6 +31,11 @@ class Category:
     name: str
     type: OpType
     keywords: list[str] = field(default_factory=list)
+    emoji: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.emoji} {self.name}" if self.emoji else self.name
 
 
 @dataclass

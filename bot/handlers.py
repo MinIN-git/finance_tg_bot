@@ -101,7 +101,7 @@ def category_keyboard(
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, c in enumerate(categories):
-        kb.button(text=c.name, callback_data=make_cb(i))
+        kb.button(text=c.label, callback_data=make_cb(i))
     kb.adjust(2)
     extra = []
     if toggle is not None:
@@ -126,8 +126,8 @@ async def pick_category_view(svc: FinanceService, pid: str, op: Operation) -> tu
 
 def pick_type_view(svc: FinanceService, pid: str, op: Operation, choices: dict[OpType, str]) -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"🟢 Доход · {choices[OpType.INCOME]}", callback_data=PickType(pid=pid, income=True))
-    kb.button(text=f"🔴 Расход · {choices[OpType.EXPENSE]}", callback_data=PickType(pid=pid, income=False))
+    kb.button(text=f"🟢 Доход · {svc.cat_label(OpType.INCOME, choices[OpType.INCOME])}", callback_data=PickType(pid=pid, income=True))
+    kb.button(text=f"🔴 Расход · {svc.cat_label(OpType.EXPENSE, choices[OpType.EXPENSE])}", callback_data=PickType(pid=pid, income=False))
     kb.button(text=CANCEL_TEXT, callback_data=PickCat(pid=pid, idx=-1))
     kb.adjust(1)
     what = html.escape(op.comment) if op.comment else "операция"

@@ -66,6 +66,17 @@ class FinanceService:
         self._pending: OrderedDict[str, Operation] = OrderedDict()
         self._pending_choices: dict[str, dict[OpType, str]] = {}
         self._snapshots: dict[int, SnapshotSession] = {}
+        self._icons: dict[tuple[OpType, str], str] = {}
+
+    async def _categories(self) -> list[Category]:
+        """Категории из хранилища; заодно обновляет кэш эмодзи для describe()."""
+        cats = await self.storage.list_categories()
+        self._icons = {(c.type, c.name): c.emoji for c in cats if c.emoji}
+        return cats
+
+    def cat_label(self, op_type: OpType, name: str) -> str:
+        emoji = self._icons.get((op_type, name))
+        return f"{emoji} {name}" if emoji else name
 
     def today(self) -> date:
         return self._today_fn() if self._today_fn else datetime.now(self.tz).date()
@@ -87,7 +98,7 @@ class FinanceService:
         )
         if op.type == OpType.TRANSFER:
             return Prepared(op, needs_category=False)
-        categories = await self.storage.list_categories()
+        categories = await self._categories()
         if parsed.explicit_sign:
             op.category = guess_category(op.comment, op.type, categories) or ""
             return Prepared(op, needs_category=not op.category)
@@ -126,7 +137,7 @@ class FinanceService:
         return self._pending.get(pending_id)
 
     async def categories_for(self, op_type: OpType) -> list[Category]:
-        return [c for c in await self.storage.list_categories() if c.type == op_type]
+        return [c for c in await self._categories() if c.type == op_type]
 
     async def learn(self, op: Operation) -> str | None:
         """Запоминает слово из комментария как ключевое для категории операции."""
@@ -135,7 +146,7 @@ class FinanceService:
         kw = learnable_keyword(op.comment)
         if kw is None:
             return None
-        categories = await self.storage.list_categories()
+        categories = await self._categories()
         if guess_category(op.comment, op.type, categories) == op.category:
             return None
         await self.storage.add_keyword(op.category, op.type, kw)
@@ -166,6 +177,7 @@ class FinanceService:
         return await self.storage.delete_operation(op_id)
 
     async def last(self, n: int = 10) -> list[Operation]:
+        await self._categories()
         ops = await self.storage.list_operations()
         return list(reversed(ops[-n:]))
 
@@ -173,21 +185,22 @@ class FinanceService:
         if op.type == OpType.TRANSFER:
             head = f"🔁 Перевод {fmt_money(op.amount, self.cur)}: {html.escape(op.account)} → {html.escape(op.to_account)}"
         elif op.type == OpType.INCOME:
-            head = f"🟢 Доход {fmt_money(op.amount, self.cur)} · {html.escape(op.category or '?')}"
+            head = f"🟢 Доход {fmt_money(op.amount, self.cur)} · {html.escape(self.cat_label(op.type, op.category) or '?')}"
         else:
-            head = f"🔴 Расход {fmt_money(op.amount, self.cur)} · {html.escape(op.category or '?')}"
+            head = f"🔴 Расход {fmt_money(op.amount, self.cur)} · {html.escape(self.cat_label(op.type, op.category) or '?')}"
         parts = [head, fmt_short_date(op.date)]
         if op.comment:
             parts.append(html.escape(op.comment))
         if op.type != OpType.TRANSFER and op.account:
             parts.append(f"@{html.escape(op.account)}")
-        if op.tags:
-            parts.append(" ".join(f"#{html.escape(t)}" for t in op.tags))
+        tags = [t for t in op.tags if t not in reports.HIDDEN_TAGS]
+        if tags:
+            parts.append(" ".join(f"#{html.escape(t)}" for t in tags))
         return " · ".join(parts)
 
     def describe_short(self, op: Operation) -> str:
         sign = {OpType.INCOME: "+", OpType.EXPENSE: "−", OpType.TRANSFER: "⇄"}[op.type]
-        what = op.category if op.type != OpType.TRANSFER else f"{op.account}→{op.to_account}"
+        what = self.cat_label(op.type, op.category) if op.type != OpType.TRANSFER else f"{op.account}→{op.to_account}"
         comment = f" {op.comment}" if op.comment else ""
         return html.escape(f"{fmt_short_date(op.date)} {sign}{fmt_money(op.amount, self.cur)} {what}{comment}")
 
@@ -197,38 +210,42 @@ class FinanceService:
         today = self.today()
         ops = await self.storage.list_operations()
         s = reports.summarize(ops, reports.month_start(today), today)
-        return reports.format_month(s, today, self.cur)
+        await self._categories()
+        return reports.format_month(s, today, self.cur, self._icons)
 
     async def week_text(self) -> str:
         today = self.today()
         ops = await self.storage.list_operations()
         s = reports.summarize(ops, reports.week_start(today), today)
-        return reports.format_week(s, self.cur)
+        await self._categories()
+        return reports.format_week(s, self.cur, self._icons)
 
     async def category_text(self, query: str) -> str:
-        cats = find_category(query, await self.storage.list_categories())
+        cats = find_category(query, await self._categories())
         names = list(dict.fromkeys(c.name for c in cats))
         if not names:
             return f"Категория «{html.escape(query)}» не найдена. Список: /categories"
         if len(names) > 1:
             return "Уточните категорию: " + ", ".join(html.escape(n) for n in names)
         ops = await self.storage.list_operations()
-        return reports.format_category_report(names[0], ops, self.today(), self.cur)
+        icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
+        return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
 
     async def monthly_report_text(self, month: date | None = None) -> str:
         month = month or reports.add_months(self.today(), -1)
         ops = await self.storage.list_operations()
-        return reports.format_monthly_report(reports.monthly_report(ops, month), self.cur)
+        await self._categories()
+        return reports.format_monthly_report(reports.monthly_report(ops, month), self.cur, self._icons)
 
     async def categories_text(self) -> str:
-        cats = await self.storage.list_categories()
+        cats = await self._categories()
         lines = []
         for t, title in ((OpType.EXPENSE, "Расходы"), (OpType.INCOME, "Доходы")):
             lines.append(f"<b>{title}:</b>")
             for c in cats:
                 if c.type == t:
                     kws = ", ".join(c.keywords[:8]) + ("…" if len(c.keywords) > 8 else "")
-                    lines.append(f"· {html.escape(c.name)}" + (f" — <i>{html.escape(kws)}</i>" if kws else ""))
+                    lines.append(f"{c.emoji or '·'} {html.escape(c.name)}" + (f" — <i>{html.escape(kws)}</i>" if kws else ""))
             lines.append("")
         lines.append("Ключевые слова редактируются на листе «Категории», затем /refresh.")
         return "\n".join(lines)
