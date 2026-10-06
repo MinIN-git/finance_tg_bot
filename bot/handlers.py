@@ -13,6 +13,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from . import reports
 from .models import Category, Operation, OpType
 from .parser import ParseError
 from .service import FinanceService, SnapshotQuestion, parse_plain_amount
@@ -70,6 +71,20 @@ class DelOp(CallbackData, prefix="del"):
     from_list: bool = False
 
 
+class MonthView(CallbackData, prefix="mv"):
+    view: str  # main | all | last
+
+
+class ReportView(CallbackData, prefix="rv"):
+    month: str  # ГГГГ-ММ
+    view: str   # main | heavy | all
+
+
+class StatsView(CallbackData, prefix="sv"):
+    n: int
+    view: str   # main | heavy
+
+
 class Snap(CallbackData, prefix="snap"):
     pos: int  # номер вопроса; -1 — прервать опрос
 
@@ -93,6 +108,46 @@ class WhitelistMiddleware(BaseMiddleware):
 
 
 # ---------- клавиатуры ----------
+
+BACK = "← Назад"
+
+
+def month_keyboard(view: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if view == "main":
+        kb.button(text="📋 Все категории", callback_data=MonthView(view="all"))
+        kb.button(text="🕑 Последние траты", callback_data=MonthView(view="last"))
+    else:
+        kb.button(text=BACK, callback_data=MonthView(view="main"))
+    return kb.as_markup()
+
+
+def report_keyboard(month, view: str) -> InlineKeyboardMarkup:
+    key = month.strftime("%Y-%m")
+    kb = InlineKeyboardBuilder()
+    if view == "main":
+        kb.button(text="🧾 Тяжелые траты", callback_data=ReportView(month=key, view="heavy"))
+        kb.button(text="📋 Все категории", callback_data=ReportView(month=key, view="all"))
+    else:
+        kb.button(text=BACK, callback_data=ReportView(month=key, view="main"))
+    return kb.as_markup()
+
+
+def stats_keyboard(n: int, view: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if view == "main":
+        kb.button(text="🧾 Тяжелые траты", callback_data=StatsView(n=n, view="heavy"))
+    else:
+        kb.button(text=BACK, callback_data=StatsView(n=n, view="main"))
+    return kb.as_markup()
+
+
+async def _edit(call: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest:  # «message is not modified» при повторном нажатии
+        pass
+    await call.answer()
 
 CANCEL_TEXT = "✖️ Не записывать"
 
@@ -171,7 +226,7 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("month"))
 async def cmd_month(message: Message, svc: FinanceService) -> None:
-    await message.answer(await svc.month_text())
+    await message.answer(await svc.month_text(), reply_markup=month_keyboard("main"))
 
 
 @router.message(Command("week"))
@@ -181,7 +236,8 @@ async def cmd_week(message: Message, svc: FinanceService) -> None:
 
 @router.message(Command("report"))
 async def cmd_report(message: Message, svc: FinanceService) -> None:
-    await message.answer(await svc.monthly_report_text())
+    month = reports.add_months(svc.today(), -1)
+    await message.answer(await svc.month_close_text(month), reply_markup=report_keyboard(month, "main"))
 
 
 @router.message(Command("cat"))
@@ -202,11 +258,15 @@ async def cmd_big(message: Message, svc: FinanceService) -> None:
     await message.answer(await svc.big_text())
 
 
-@router.message(Command("quarter", "квартал"))
-async def cmd_quarter(message: Message, svc: FinanceService) -> None:
-    from .notify import send_quarter
+@router.message(Command("stats", "статистика", "quarter", "квартал"))
+async def cmd_stats(message: Message, command: CommandObject, svc: FinanceService) -> None:
+    from .notify import send_stats
 
-    await send_quarter(message.bot, message.chat.id, svc)
+    arg = (command.args or "").strip()
+    n = int(arg) if arg.isdigit() and int(arg) in reports.STATS_PERIODS else 3
+    if arg and not (arg.isdigit() and int(arg) in reports.STATS_PERIODS):
+        await message.answer("Период — 3, 6 или 12 месяцев: <code>/stats 6</code>. Показываю за 3.")
+    await send_stats(message.bot, message.chat.id, svc, n)
 
 
 @router.message(Command("signals", "сигналы"))
@@ -308,6 +368,31 @@ async def on_snapshot_button(call: CallbackQuery, callback_data: Snap, svc: Fina
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Взято прошлое значение")
     await send_snapshot_step(call.message, svc, nxt)
+
+
+# ---------- переключение видов отчетов ----------
+
+@router.callback_query(MonthView.filter())
+async def on_month_view(call: CallbackQuery, callback_data: MonthView, svc: FinanceService) -> None:
+    await _edit(call, await svc.month_text(callback_data.view), month_keyboard(callback_data.view))
+
+
+@router.callback_query(ReportView.filter())
+async def on_report_view(call: CallbackQuery, callback_data: ReportView, svc: FinanceService) -> None:
+    from datetime import date
+
+    year, month = map(int, callback_data.month.split("-"))
+    first = date(year, month, 1)
+    await _edit(call, await svc.month_close_text(first, callback_data.view), report_keyboard(first, callback_data.view))
+
+
+@router.callback_query(StatsView.filter())
+async def on_stats_view(call: CallbackQuery, callback_data: StatsView, svc: FinanceService) -> None:
+    if callback_data.view == "heavy":
+        text = await svc.stats_heavy_text(callback_data.n)
+    else:
+        text, _ = await svc.stats_report(callback_data.n)
+    await _edit(call, text, stats_keyboard(callback_data.n, callback_data.view))
 
 
 # ---------- ввод операций ----------

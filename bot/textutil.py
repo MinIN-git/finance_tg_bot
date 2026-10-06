@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 MONTHS_NOMINATIVE = [
     "январь", "февраль", "март", "апрель", "май", "июнь",
@@ -10,6 +10,10 @@ MONTHS_NOMINATIVE = [
 MONTHS_DATIVE = [
     "январю", "февралю", "марту", "апрелю", "маю", "июню",
     "июлю", "августу", "сентябрю", "октябрю", "ноябрю", "декабрю",
+]
+MONTHS_GENITIVE = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ]
 MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
 
@@ -21,8 +25,9 @@ def normalize(text: str) -> str:
     return text.lower().replace("ё", "е")
 
 
-def fmt_money(value: Decimal, currency: str = "", signed: bool = False) -> str:
-    q = value.quantize(Decimal("0.01"))
+def fmt_money(value: Decimal, currency: str = "", signed: bool = False, exact: bool = False) -> str:
+    """«12 400», «+650», «99,90» (копейки — только с exact=True, в отчетах суммы целые)."""
+    q = value.quantize(Decimal("0.01") if exact else Decimal(1), rounding=ROUND_HALF_UP)
     sign = ""
     if q < 0:
         sign = "−"
@@ -35,6 +40,15 @@ def fmt_money(value: Decimal, currency: str = "", signed: bool = False) -> str:
         body = f"{q:,.2f}".replace(".", "#")
     body = body.replace(",", NBSP).replace("#", ",")
     return f"{sign}{body}{NBSP}{currency}" if currency else f"{sign}{body}"
+
+
+def fmt_k(value: Decimal, currency: str = "", signed: bool = False) -> str:
+    """Суммы в итогах: «837 тыс», «+47 тыс», «1 506 тыс», мелочь — как есть («650»)."""
+    if abs(value) < 1000:
+        return fmt_money(value, currency, signed)
+    thousands = (value / 1000).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    body = fmt_money(thousands, signed=signed)
+    return f"{body}{NBSP}тыс{NBSP}{currency}" if currency else f"{body}{NBSP}тыс"
 
 
 def fmt_date(d: date) -> str:

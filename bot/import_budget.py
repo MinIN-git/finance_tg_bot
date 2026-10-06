@@ -356,13 +356,13 @@ def format_plan(plans: Sequence[MonthPlan], warnings: Sequence[str], cur: str = 
             ("Доходы", b.income, b.income_total, b.income_sum),
             ("Расходы", b.expense, b.expense_total, b.expense_sum),
         ):
-            total_txt = fmt_money(total, cur) if total is not None else "не найден"
-            lines.append(f"{title}: сумма категорий {fmt_money(s, cur)}, итог в листе {total_txt}")
+            total_txt = fmt_money(total, cur, exact=True) if total is not None else "не найден"
+            lines.append(f"{title}: сумма категорий {fmt_money(s, cur, exact=True)}, итог в листе {total_txt}")
         for op in p.operations:
             sign = "+" if op.type == OpType.INCOME else "−"
-            lines.append(f"  {op.date:%d.%m.%Y} {sign}{fmt_money(op.amount, cur):>14}  {op.category:<20} {op.comment}")
+            lines.append(f"  {op.date:%d.%m.%Y} {sign}{fmt_money(op.amount, cur, exact=True):>14}  {op.category:<20} {op.comment}")
         for item in p.unmapped:
-            lines.append(f"  ⚠️  НЕ СОПОСТАВЛЕНО: «{item.name}» ({item.cell}) {fmt_money(item.amount, cur)}")
+            lines.append(f"  ⚠️  НЕ СОПОСТАВЛЕНО: «{item.name}» ({item.cell}) {fmt_money(item.amount, cur, exact=True)}")
         for issue in p.issues:
             lines.append(f"  ⚠️  {issue}")
         if p.existing_import_ids:

@@ -78,7 +78,7 @@ def test_month_text(svc):
     run(svc.save(run(svc.prepare("+100000 зп")).op))
     run(svc.save(run(svc.prepare("вчера 350 кофе")).op))
     text = run(svc.month_text())
-    assert "Октябрь 2026" in text
+    assert "<b>Октябрь</b>, 4-й день" in text
     assert "Еда вне дома" in text
 
 
@@ -108,7 +108,7 @@ def test_snapshot_flow():
     oct_ = {e.account: e.amount for e in run(storage.list_balances()) if e.date == date(2026, 10, 1)}
     assert oct_ == {"Карта": 3100, "Вклад": 9300, "Наличные": 500}
     text = run(svc.capital_text())
-    assert "к сентябрю" in text
+    assert "к 1 сентября" in text
     assert run(svc.answer_snapshot(1, Decimal(1))) == (False, None)
 
 

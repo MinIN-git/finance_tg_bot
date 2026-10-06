@@ -1,4 +1,9 @@
-"""Расчеты и тексты отчетов. Чистые функции без обращения к хранилищу."""
+"""Расчеты и тексты отчетов. Чистые функции без обращения к хранилищу.
+
+Правила оформления: суммы без копеек (в итогах — «тыс»), никаких процентов сбережений,
+отметки «выше/ниже обычного» и стрелки — только при отклонении больше 30%,
+«обычно» — среднее за 3 прошлых полных месяца без тяжелых трат.
+"""
 from __future__ import annotations
 
 import html
@@ -10,7 +15,8 @@ from typing import Iterable, Mapping, Sequence
 
 from .models import BalanceEntry, BigPurchase, Operation, OpType, is_heavy
 from .textutil import (
-    MONTHS_DATIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_date, fmt_money, fmt_percent, fmt_short_date, month_title,
+    MONTHS_GENITIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_date, fmt_k, fmt_money, fmt_percent, fmt_short_date,
+    month_title,
 )
 
 ZERO = Decimal(0)
@@ -33,8 +39,22 @@ def add_months(d: date, n: int) -> date:
     return date(idx // 12, idx % 12 + 1, 1)
 
 
+def shift_months(d: date, n: int) -> date:
+    """Та же дата n месяцев назад/вперед (день обрезается до конца месяца)."""
+    first = add_months(d, n)
+    return first.replace(day=min(d.day, month_end(first).day))
+
+
 def week_start(d: date) -> date:
     return d - timedelta(days=d.weekday())
+
+
+def period_title(first: date, last: date) -> str:
+    """«Июль – сентябрь» (год — если месяцы в разных годах или не текущий)."""
+    a, b = MONTHS_NOMINATIVE[first.month - 1], MONTHS_NOMINATIVE[last.month - 1]
+    if first.year != last.year:
+        return f"{a.capitalize()} {first.year} – {b} {last.year}"
+    return f"{a.capitalize()} – {b}" if first != last else a.capitalize()
 
 
 # ---------- сводка ----------
@@ -60,12 +80,6 @@ class Summary:
     @property
     def balance(self) -> Decimal:
         return self.income - self.expense
-
-    @property
-    def savings_rate(self) -> Decimal | None:
-        if self.income <= 0:
-            return None
-        return self.balance / self.income * 100
 
 
 def _sorted_totals(totals: dict[str, Decimal]) -> list[tuple[str, Decimal]]:
@@ -167,53 +181,12 @@ def usual(ops: Sequence[Operation], bigs: Sequence[BigPurchase], month: date, wi
     )
 
 
-# ---------- месячный отчет ----------
+# ---------- общие элементы оформления ----------
 
-@dataclass
-class MonthlyReport:
-    summary: Summary
-    avg_months: list[date]          # первые числа месяцев, по которым считалось среднее
-    avg_income: Decimal | None
-    avg_expense: Decimal | None
-    avg_by_category: dict[str, Decimal]            # расходы
-    avg_income_by_category: dict[str, Decimal] = field(default_factory=dict)
-
-
-def monthly_report(ops: Sequence[Operation], month: date, avg_window: int = 3) -> MonthlyReport:
-    """Отчет за месяц `month` + сравнение со средним за предыдущие `avg_window` месяцев.
-
-    В среднее берутся только месяцы, в которых есть операции (чтобы первые месяцы
-    использования бота не занижали среднее).
-    """
-    first = month_start(month)
-    summary = summarize_month(ops, first)
-    prev = [summarize_month(ops, add_months(first, -i)) for i in range(1, avg_window + 1)]
-    prev = [p for p in prev if p.count > 0]
-    if not prev:
-        return MonthlyReport(summary, [], None, None, {})
-    n = Decimal(len(prev))
-    by_cat: dict[str, Decimal] = defaultdict(lambda: ZERO)
-    inc_cat: dict[str, Decimal] = defaultdict(lambda: ZERO)
-    for p in prev:
-        for name, amount in p.expense_by_category:
-            by_cat[name] += amount
-        for name, amount in p.income_by_category:
-            inc_cat[name] += amount
-    return MonthlyReport(
-        summary=summary,
-        avg_months=sorted(p.start for p in prev),
-        avg_income=sum((p.income for p in prev), ZERO) / n,
-        avg_expense=sum((p.expense for p in prev), ZERO) / n,
-        avg_by_category={k: v / n for k, v in by_cat.items()},
-        avg_income_by_category={k: v / n for k, v in inc_cat.items()},
-    )
-
-
-# ---------- форматирование ----------
-
-HIDDEN_TAGS = {"импорт", "тяжелое"}           # служебные теги в отчетах не показываем
-NEAR_AVERAGE_PCT = 3               # |отклонение| меньше — «≈ среднее»
-MULTIPLIER_FROM = 3                # с ×3 вместо процентов показываем разницу в деньгах и множитель
+HIDDEN_TAGS = {"импорт", "тяжелое"}   # служебные теги в отчетах не показываем
+DEVIATION_PCT = 30                    # меньше — «как обычно», без отметок
+MULTIPLIER_FROM = 3                   # с ×3 вместо процентов — множитель
+MIN_NOTABLE = Decimal(1000)           # мелкие категории не попадают в «выше/ниже обычного»
 
 Icons = Mapping[tuple[OpType, str], str]
 
@@ -223,277 +196,96 @@ def _icon(icons: Icons | None, op_type: OpType, name: str) -> str:
     return f"{emoji} " if emoji else ""
 
 
-def _share(part: Decimal, total: Decimal) -> str:
-    return fmt_percent(part / total * 100) if total > 0 else "—"
+def _label(icons: Icons | None, op_type: OpType, name: str) -> str:
+    return f"{_icon(icons, op_type, name)}{html.escape(name)}"
 
 
-def compare_to_average(current: Decimal, avg: Decimal | None, cur: str = "", near: str = "≈ среднее") -> str:
-    """«⬆️ +12%», «⬇️ −20%», «≈ среднее», «⬆️ +11 400 (×115)», «🆕»."""
+def deviation(current: Decimal, avg: Decimal | None) -> str:
+    """«⬆️ +45%», «⬇️ −40%», «⬆️ ×3,6»; пусто, если отклонение не больше 30% или сравнивать не с чем."""
     if avg is None or avg <= 0:
-        return "🆕" if current > 0 else ""
+        return ""
     ratio = current / avg
     pct = (ratio - 1) * 100
-    if abs(pct) < NEAR_AVERAGE_PCT:
-        return near
-    arrow = "⬆️" if pct > 0 else "⬇️"
+    if abs(pct) <= DEVIATION_PCT:
+        return ""
     if ratio >= MULTIPLIER_FROM:
         mult = f"{ratio:.0f}" if ratio >= 10 else f"{ratio:.1f}".replace(".", ",")
-        return f"{arrow} {fmt_money(current - avg, cur, signed=True)} (×{mult})"
-    sign = "+" if pct > 0 else "−"
-    return f"{arrow} {sign}{abs(round(pct))}%"
+        return f"⬆️ ×{mult}"
+    return f"⬆️ +{round(pct)}%" if pct > 0 else f"⬇️ −{abs(round(pct))}%"
 
 
-def _balance_line(s: Summary, cur: str) -> str:
-    mark = "🟢" if s.balance >= 0 else "🔴"
-    line = f"{mark} Сальдо: <b>{fmt_money(s.balance, cur, signed=True)}</b>"
-    if s.savings_rate is not None:
-        line += f" · сбережения {fmt_percent(s.savings_rate)}"
-    return line
+def _result_line(balance: Decimal, cur: str, k: bool = True) -> str:
+    mark = "🟢" if balance >= 0 else "🔴"
+    value = fmt_k(balance, cur, signed=True) if k else fmt_money(balance, cur, signed=True)
+    return f"{mark} Итог <b>{value}</b>"
 
 
-def format_totals(s: Summary, cur: str = "", r: MonthlyReport | None = None) -> list[str]:
-    inc_cmp = exp_cmp = ""
-    if r is not None and r.avg_months:
-        inc_cmp = f"  {compare_to_average(s.income, r.avg_income, cur)}"
-        exp_cmp = f"  {compare_to_average(s.expense, r.avg_expense, cur)}"
-    return [
-        f"💰 Доход: <b>{fmt_money(s.income, cur)}</b>{inc_cmp}",
-        f"💸 Расход: <b>{fmt_money(s.expense, cur)}</b>{exp_cmp}",
-        _balance_line(s, cur),
-    ]
-
-
-def format_categories(
-    items: Sequence[tuple[str, Decimal]],
-    total: Decimal,
-    op_type: OpType,
-    cur: str = "",
-    icons: Icons | None = None,
-    averages: Mapping[str, Decimal] | None = None,
+def category_lines(
+    items: Sequence[tuple[str, Decimal]], op_type: OpType, cur: str = "", icons: Icons | None = None,
+    limit: int | None = None,
 ) -> list[str]:
-    """Все ненулевые категории по убыванию: «🛒 Продукты домой — 12 000 · 35%  ⬆️ +10%»."""
-    lines = []
-    for name, amount in items:
-        if amount <= 0:
-            continue
-        line = f"{_icon(icons, op_type, name)}{html.escape(name)} — {fmt_money(amount, cur)} · {_share(amount, total)}"
-        if averages is not None:
-            line += f"  {compare_to_average(amount, averages.get(name), cur)}"
-        lines.append(line.rstrip())
-    return lines
+    shown = [(n, a) for n, a in items if a > 0][:limit]
+    return [f"{_label(icons, op_type, n)} — {fmt_money(a, cur)}" for n, a in shown]
 
 
 def format_tags(s: Summary, cur: str = "") -> list[str]:
     lines = []
     for tag, st in s.tags.items():
-        if tag in HIDDEN_TAGS:
+        if tag in HIDDEN_TAGS or tag.startswith("поездка-"):
             continue
         parts = []
         if st.expense:
             parts.append(f"расход {fmt_money(st.expense, cur)}")
         if st.income:
             parts.append(f"доход {fmt_money(st.income, cur)}")
-        lines.append(f"🏷 #{html.escape(tag)}: {', '.join(parts)} · {st.count} оп.")
+        lines.append(f"🏷 #{html.escape(tag)}: {', '.join(parts)}")
     return lines
 
 
-def _sections(s: Summary, cur: str, icons: Icons | None, r: MonthlyReport | None = None) -> list[str]:
-    lines: list[str] = []
+# ---------- текущий месяц (/month) и неделя ----------
+
+TOP_NOW = 5
+
+
+def format_now(title: str, s: Summary, heavy_total: Decimal, cur: str = "", icons: Icons | None = None) -> str:
+    """Только текущий период, без сравнений с прошлым."""
+    lines = [
+        title,
+        f"💸 <b>{fmt_money(s.expense, cur)}</b> потрачено",
+        f"🧾 из них тяжелые: {fmt_money(heavy_total, cur) if heavy_total else '—'}",
+        f"💰 <b>{fmt_money(s.income, cur)}</b> пришло",
+    ]
+    top = category_lines(s.expense_by_category, OpType.EXPENSE, cur, icons, TOP_NOW)
+    if top:
+        lines += ["", "<b>Больше всего:</b>", *top]
+    elif s.count == 0:
+        lines += ["", "Записей пока нет."]
+    return "\n".join(lines)
+
+
+def month_now_title(today: date) -> str:
+    return f"📅 <b>{MONTHS_NOMINATIVE[today.month - 1].capitalize()}</b>, {today.day}-й день"
+
+
+def week_title(start: date, end: date) -> str:
+    return f"🗓 <b>Неделя</b> {fmt_short_date(start)}–{fmt_short_date(end)}"
+
+
+def format_all_categories(title: str, s: Summary, cur: str = "", icons: Icons | None = None) -> str:
+    lines = [title]
     if s.expense_by_category:
-        lines += ["", "<b>💸 Расходы</b>", *format_categories(
-            s.expense_by_category, s.expense, OpType.EXPENSE, cur, icons,
-            r.avg_by_category if r and r.avg_months else None,
-        )]
+        lines += ["", "<b>💸 Расходы</b>", *category_lines(s.expense_by_category, OpType.EXPENSE, cur, icons)]
     if s.income_by_category:
-        lines += ["", "<b>💰 Доходы</b>", *format_categories(
-            s.income_by_category, s.income, OpType.INCOME, cur, icons,
-            r.avg_income_by_category if r and r.avg_months else None,
-        )]
+        lines += ["", "<b>💰 Доходы</b>", *category_lines(s.income_by_category, OpType.INCOME, cur, icons)]
     tags = format_tags(s, cur)
     if tags:
         lines += ["", "<b>Теги</b>", *tags]
-    return lines
-
-
-def format_period(title: str, s: Summary, cur: str = "", icons: Icons | None = None) -> str:
-    lines = [f"<b>{title}</b>", "", *format_totals(s, cur), *_sections(s, cur, icons)]
-    if s.count == 0:
-        lines += ["", "Операций пока нет."]
-    return "\n".join(lines)
-
-
-def format_month(s: Summary, today: date, cur: str = "", icons: Icons | None = None, pace: str = "") -> str:
-    title = f"📅 {month_title(s.start).capitalize()} · 1–{today.day} {MONTHS_SHORT[today.month - 1]}"
-    text = format_period(title, s, cur, icons)
-    if pace:
-        head, _, rest = text.partition("\n\n")
-        lines = rest.split("\n")
-        # темп — сразу после строк доход/расход/сальдо
-        text = "\n".join([head, "", *lines[:3], pace, *lines[3:]])
-    return text
-
-
-def format_week(s: Summary, cur: str = "", icons: Icons | None = None) -> str:
-    title = f"🗓 Неделя {fmt_short_date(s.start)}–{fmt_short_date(s.end)}"
-    return format_period(title, s, cur, icons)
-
-
-DEVIATION_MIN_PCT = 20
-
-
-def top_deviations(r: MonthlyReport, limit: int = 3) -> list[tuple[str, Decimal, Decimal | None]]:
-    """Категории расходов, сильнее всего отклонившиеся от среднего (в деньгах), |откл.| ≥ 20%.
-    Возвращает (категория, сумма за месяц, среднее)."""
-    if not r.avg_months:
-        return []
-    current = dict(r.summary.expense_by_category)
-    out = []
-    for name in set(current) | set(r.avg_by_category):
-        amount, avg = current.get(name, ZERO), r.avg_by_category.get(name)
-        base = avg or ZERO
-        if base > 0 and abs(amount - base) / base * 100 < DEVIATION_MIN_PCT:
-            continue
-        out.append((abs(amount - base), name, amount, avg))
-    out.sort(key=lambda x: (-x[0], x[1]))
-    return [(name, amount, avg) for _, name, amount, avg in out[:limit] if _ > 0]
-
-
-def report_conclusion(r: MonthlyReport, cur: str = "", icons: Icons | None = None) -> str:
-    """Короткий вывод в одну строку."""
-    s = r.summary
-    if s.balance >= 0:
-        rate = f", отложено {fmt_percent(s.savings_rate)} дохода" if s.savings_rate is not None else ""
-        parts = [f"месяц в плюсе на {fmt_money(s.balance, cur)}{rate}"]
-    else:
-        parts = [f"расходы превысили доходы на {fmt_money(-s.balance, cur)}"]
-    if r.avg_months and r.avg_expense:
-        pct = round((s.expense - r.avg_expense) / r.avg_expense * 100)
-        ratio = s.expense / r.avg_expense
-        if ratio >= MULTIPLIER_FROM:
-            mult = f"{ratio:.0f}" if ratio >= 10 else f"{ratio:.1f}".replace(".", ",")
-            parts.append(f"траты в {mult} раза выше среднего")
-        elif abs(pct) >= NEAR_AVERAGE_PCT:
-            parts.append(f"траты {'выше' if pct > 0 else 'ниже'} среднего на {abs(pct)}%")
-        devs = top_deviations(r)
-        if devs:
-            items = [
-                f"{_icon(icons, OpType.EXPENSE, name)}{html.escape(name)} {compare_to_average(amount, avg, cur)}"
-                for name, amount, avg in devs
-            ]
-            parts.append("сильнее всего отклонились: " + ", ".join(items))
-    text = "; ".join(parts)
-    return f"💬 {text[0].upper()}{text[1:]}."
-
-
-def format_monthly_report(r: MonthlyReport, cur: str = "", icons: Icons | None = None) -> str:
-    s = r.summary
-    lines = [f"📊 <b>{month_title(s.start).capitalize()}</b> — итоги месяца", "", *format_totals(s, cur, r)]
-    if s.count == 0:
-        lines += ["", "За этот месяц операций нет."]
-        return "\n".join(lines)
-    if r.avg_months:
-        months = ", ".join(MONTHS_SHORT[m.month - 1] for m in r.avg_months)
-        lines.append(f"<i>Сравнение — со средним за {len(r.avg_months)} мес. ({months})</i>")
-    lines += _sections(s, cur, icons, r)
-    if not r.avg_months:
-        lines += ["", "Для сравнения со средним пока мало данных."]
-    lines += ["", report_conclusion(r, cur, icons)]
-    return "\n".join(lines)
-
-
-def format_category_report(
-    name: str,
-    ops: Sequence[Operation],
-    today: date,
-    cur: str = "",
-    history_months: int = 3,
-    max_items: int = 20,
-    icon: str = "",
-) -> str:
-    first = month_start(today)
-    in_cat = [op for op in ops if op.category == name and op.type != OpType.TRANSFER]
-    current = sorted((op for op in in_cat if first <= op.date <= today), key=lambda o: o.date, reverse=True)
-    total = sum((op.amount for op in current), ZERO)
-    head = f"{icon} " if icon else "🏷 "
-    lines = [f"{head}<b>{html.escape(name)}</b> — {month_title(first)}", f"Итого: <b>{fmt_money(total, cur)}</b> ({len(current)} оп.)"]
-    for op in current[:max_items]:
-        comment = f" {html.escape(op.comment)}" if op.comment else ""
-        lines.append(f"{fmt_short_date(op.date)} · {fmt_money(op.amount, cur)}{comment}")
-    if len(current) > max_items:
-        lines.append(f"… и еще {len(current) - max_items}")
-    hist, counted = [], []
-    for i in range(1, history_months + 1):
-        m = add_months(first, -i)
-        amount = sum((op.amount for op in in_cat if m <= op.date <= month_end(m)), ZERO)
-        hist.append(f"{MONTHS_SHORT[m.month - 1]} {m.year}: {fmt_money(amount, cur)}")
-        if any(m <= op.date <= month_end(m) for op in ops):   # месяцы без операций в среднее не идут
-            counted.append(amount)
-    lines += ["", "<b>Прошлые месяцы:</b>", *hist]
-    if counted:
-        avg = sum(counted, ZERO) / len(counted)
-        lines.append(f"Среднее за {len(counted)} мес.: <b>{fmt_money(avg.quantize(Decimal(1)), cur)}</b> в месяц")
-    return "\n".join(lines)
-
-
-# ---------- сравнение двух месяцев ----------
-
-def format_compare(ops: Sequence[Operation], m1: date, m2: date, cur: str = "", icons: Icons | None = None) -> str:
-    a, b = summarize_month(ops, m1), summarize_month(ops, m2)
-    chg = lambda x, y: compare_to_average(y, x, cur, near="≈ без изменений") if x > 0 else ("🆕" if y > 0 else "")  # noqa: E731
-
-    def row(label: str, x: Decimal, y: Decimal, signed: bool = False) -> str:
-        return f"{label}: {fmt_money(x, cur, signed=signed)} → <b>{fmt_money(y, cur, signed=signed)}</b>  {chg(x, y)}".rstrip()
-
-    lines = [
-        f"⚖️ <b>{month_title(m1).capitalize()} → {month_title(m2)}</b>", "",
-        row("💰 Доход", a.income, b.income),
-        row("💸 Расход", a.expense, b.expense),
-        f"Сальдо: {fmt_money(a.balance, cur, signed=True)} → <b>{fmt_money(b.balance, cur, signed=True)}</b>",
-    ]
-    for title, op_type, xs, ys in (
-        ("💸 Расходы", OpType.EXPENSE, dict(a.expense_by_category), dict(b.expense_by_category)),
-        ("💰 Доходы", OpType.INCOME, dict(a.income_by_category), dict(b.income_by_category)),
-    ):
-        names = sorted(set(xs) | set(ys), key=lambda n: (-max(xs.get(n, ZERO), ys.get(n, ZERO)), n))
-        if not names:
-            continue
-        lines += ["", f"<b>{title}</b>"]
-        for n in names:
-            x, y = xs.get(n, ZERO), ys.get(n, ZERO)
-            mark = chg(x, y) if y > 0 else "⬇️ не было"
-            lines.append(f"{_icon(icons, op_type, n)}{html.escape(n)}: {fmt_money(x, cur)} → {fmt_money(y, cur)}  {mark}".rstrip())
-    if not (a.count or b.count):
-        lines += ["", "За эти месяцы операций нет."]
-    return "\n".join(lines)
-
-
-# ---------- разовые траты за год ----------
-
-def format_big(bigs: Sequence[BigPurchase], ops: Sequence[Operation], today: date, cur: str = "", limit: int = 30) -> str:
-    start = add_months(month_start(today), -11)
-    items = sorted((b for b in bigs if start <= b.date <= today), key=lambda b: b.date, reverse=True)
-    total = sum((b.amount for b in items), ZERO)
-    expense = summarize(ops, start, today).expense
-    head = f"🧾 <b>Разовые траты</b> с {MONTHS_SHORT[start.month - 1]} {start.year}: <b>{fmt_money(total, cur)}</b>"
-    if expense > 0 and total > 0:
-        head += f" · {fmt_percent(total / expense * 100)} всех расходов"
-    lines = [head]
-    if not items:
-        lines.append("Пока нет. Крупные покупки записываются в лист «Большие покупки» (Дата, Что купил, Стоимость).")
-    for b in items[:limit]:
-        lines.append(f"• {fmt_date(b.date)} {html.escape(b.what) or 'покупка'} — {fmt_money(b.amount, cur)}")
-    if len(items) > limit:
-        lines.append(f"… и еще {len(items) - limit}")
+    if not s.count:
+        lines += ["", "Записей нет."]
     return "\n".join(lines)
 
 
 # ---------- остатки по счетам ----------
-
-def shift_months(d: date, n: int) -> date:
-    """Та же дата n месяцев назад/вперед (день обрезается до конца месяца)."""
-    first = add_months(d, n)
-    return first.replace(day=min(d.day, month_end(first).day))
-
 
 def group_snapshots(entries: Iterable[BalanceEntry]) -> list[tuple[date, dict[str, Decimal]]]:
     """Снимки по датам (по возрастанию): дата -> {счет: сумма}."""
@@ -501,6 +293,11 @@ def group_snapshots(entries: Iterable[BalanceEntry]) -> list[tuple[date, dict[st
     for e in entries:
         by_date[e.date][e.account] = e.amount
     return sorted(by_date.items())
+
+
+def snapshot_totals(entries: Iterable[BalanceEntry]) -> list[tuple[date, Decimal]]:
+    """Итог по каждому снимку (по возрастанию даты)."""
+    return [(d, sum(snap.values(), ZERO)) for d, snap in group_snapshots(entries)]
 
 
 @dataclass
@@ -516,6 +313,7 @@ class CapitalSummary:
     total: Decimal
     accounts: list[AccountDelta]
     prev_date: date | None = None
+    prev_total: Decimal | None = None
     total_delta: Decimal | None = None
     ops_month: date | None = None        # первое число месяца, за который считались операции
     ops_balance: Decimal | None = None   # доход − траты за этот месяц (без переводов)
@@ -553,7 +351,8 @@ def capital_summary(
     s = CapitalSummary(date=last_date, total=total, accounts=accounts)
     if prev_date is not None:
         s.prev_date = prev_date
-        s.total_delta = total - sum(prev.values(), ZERO)
+        s.prev_total = sum(prev.values(), ZERO)
+        s.total_delta = total - s.prev_total
 
     month = add_months(last_date, -1)
     month_sum = summarize_month(ops, month)
@@ -568,6 +367,16 @@ def capital_summary(
     return s
 
 
+def _on_date(d: date) -> str:
+    return f"{d.day} {MONTHS_GENITIVE[d.month - 1]}"
+
+
+def safety_months(total: Decimal, ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date) -> Decimal | None:
+    """Сколько месяцев обычных трат (без тяжелых) покрывает капитал."""
+    u = usual(ops, bigs, today)
+    return total / u.expense if u.expense else None
+
+
 def format_capital(
     s: CapitalSummary | None,
     cur: str = "",
@@ -577,13 +386,9 @@ def format_capital(
     if s is None:
         return "Остатков пока нет. Пройдите опрос по счетам: /snapshot"
     m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
-    head = f"💼 <b>{month_title(s.date).capitalize()}</b> ({fmt_short_date(s.date)}): всего <b>{m(s.total)}</b>"
+    head = f"💼 <b>Капитал на {_on_date(s.date)}</b>: <b>{m(s.total)}</b>"
     if s.total_delta is not None:
-        if (s.prev_date.year, s.prev_date.month) != (s.date.year, s.date.month):
-            ref = f"к {MONTHS_DATIVE[s.prev_date.month - 1]}"
-        else:
-            ref = f"к {fmt_short_date(s.prev_date)}"
-        head += f" ({m(s.total_delta, True)} {ref})"
+        head += f" ({m(s.total_delta, True)} к {_on_date(s.prev_date)})"
     lines = [head]
     for a in s.accounts:
         delta = f" ({m(a.delta, True)})" if a.delta is not None else ""
@@ -597,7 +402,7 @@ def format_capital(
     elif s.prev_date is None:
         lines.append("Это первый снимок — сравнение появится со следующего.")
     if safety is not None:
-        lines.append(f"🛟 Запас прочности: <b>{safety:.1f}</b> мес. обычных расходов (без разовых)".replace(".", ",", 1))
+        lines.append(f"🛟 Запас прочности: <b>{safety:.1f}</b> мес. обычных трат".replace(".", ",", 1))
     if len(history) > 1:
         lines += ["", "<b>Снимки по месяцам:</b>"]
         rows = list(history)[-12:]
@@ -608,174 +413,8 @@ def format_capital(
     return "\n".join(lines)
 
 
-def snapshot_totals(entries: Iterable[BalanceEntry]) -> list[tuple[date, Decimal]]:
-    """Итог по каждому снимку (по возрастанию даты)."""
-    return [(d, sum(snap.values(), ZERO)) for d, snap in group_snapshots(entries)]
-
-
-def avg_monthly_expense_wo_big(
-    ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date, window: int = 3,
-) -> Decimal | None:
-    """Средний месячный расход без разовых за `window` прошлых полных месяцев (месяцы без операций не считаются)."""
-    values = []
-    for i in range(1, window + 1):
-        m = add_months(month_start(today), -i)
-        s = summarize_month(ops, m)
-        if s.count:
-            values.append(max(s.expense - big_total(bigs, m, month_end(m)), ZERO))
-    return sum(values, ZERO) / len(values) if values else None
-
-
-def safety_months(total: Decimal, ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date) -> Decimal | None:
-    avg = avg_monthly_expense_wo_big(ops, bigs, today)
-    return total / avg if avg else None
-
-
-def month_pace(ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date) -> tuple[Decimal, Decimal | None]:
-    """(потрачено с начала месяца без разовых, сколько обычно уходит к этому дню).
-    «Обычно» — средний расход без разовых за 3 прошлых полных месяца пропорционально дню месяца."""
-    first = month_start(today)
-    spent = summarize(ops, first, today).expense - big_total(bigs, first, today)
-    avg = avg_monthly_expense_wo_big(ops, bigs, today)
-    expected = avg * today.day / month_end(today).day if avg is not None else None
-    return max(spent, ZERO), expected
-
-
-def format_pace(spent: Decimal, expected: Decimal | None, today: date, cur: str = "") -> str:
-    head = f"⏱ <b>Темп</b>: потрачено {fmt_money(spent, cur)} (без разовых) к {today.day}-му числу"
-    if expected is None:
-        return head
-    return f"{head}; обычно к этому дню ≈ {fmt_money(expected.quantize(Decimal(1)), cur)}  {compare_to_average(spent, expected, cur)}".rstrip()
-
-
-# ---------- итоги месяца (отчет 1 числа) ----------
-
-SNAPSHOT_GRACE_DAYS = 6       # снимок остатков до 6-го числа следующего месяца относится к закрытию месяца
+SNAPSHOT_GRACE_DAYS = 6       # снимок до 6-го числа следующего месяца относится к закрытию месяца
 RECONCILE_WARN_SHARE = Decimal("0.10")
-
-
-def big_total(bigs: Iterable[BigPurchase], start: date, end: date) -> Decimal:
-    return sum((b.amount for b in bigs if start <= b.date <= end), ZERO)
-
-
-@dataclass
-class MonthClose:
-    report: MonthlyReport
-    big: list[BigPurchase]
-    capital: CapitalSummary | None
-    rolling: Summary
-    rolling_big: Decimal
-
-    @property
-    def big_total(self) -> Decimal:
-        return sum((b.amount for b in self.big), ZERO)
-
-    @property
-    def expense_wo_big(self) -> Decimal:
-        return max(self.report.summary.expense - self.big_total, ZERO)
-
-    @property
-    def balance_wo_big(self) -> Decimal:
-        return self.report.summary.income - self.expense_wo_big
-
-    @property
-    def reconcile_diff(self) -> Decimal | None:
-        """Прирост капитала − сальдо месяца (то, что операции не объясняют)."""
-        c = self.capital
-        if c is None or c.total_delta is None:
-            return None
-        return c.total_delta - self.report.summary.balance
-
-    @property
-    def reconcile_warning(self) -> bool:
-        diff, income = self.reconcile_diff, self.report.summary.income
-        return diff is not None and income > 0 and abs(diff) > income * RECONCILE_WARN_SHARE
-
-
-def month_close(
-    ops: Sequence[Operation],
-    bigs: Sequence[BigPurchase],
-    balances: Sequence[BalanceEntry],
-    month: date,
-    account_order: Sequence[str] = (),
-) -> MonthClose:
-    first, last = month_start(month), month_end(month)
-    report = monthly_report(ops, first)
-    cutoff = last + timedelta(days=SNAPSHOT_GRACE_DAYS)
-    capital = capital_summary([b for b in balances if b.date <= cutoff], ops, account_order)
-    if capital is not None and capital.date < last - timedelta(days=SNAPSHOT_GRACE_DAYS):
-        capital = None   # свежего снимка на конец месяца нет
-    rolling_start = add_months(first, -2)
-    return MonthClose(
-        report=report,
-        big=sorted((b for b in bigs if first <= b.date <= last), key=lambda b: b.date),
-        capital=capital,
-        rolling=summarize(ops, rolling_start, last),
-        rolling_big=big_total(bigs, rolling_start, last),
-    )
-
-
-def format_capital_block(c: CapitalSummary, cur: str = "") -> list[str]:
-    """Капитал в отчете месяца: итог, счета, изменение (без строки «доход − траты» — она выше)."""
-    m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
-    head = f"💼 <b>Капитал на {fmt_short_date(c.date)}</b>: <b>{m(c.total)}</b>"
-    if c.total_delta is not None:
-        head += f" ({m(c.total_delta, True)} к {fmt_short_date(c.prev_date)})"
-    lines = [head]
-    for a in c.accounts:
-        delta = f" ({m(a.delta, True)})" if a.delta is not None else ""
-        lines.append(f"• {html.escape(a.account)}: {m(a.amount)}{delta}")
-    return lines
-
-
-def format_month_close(mc: MonthClose, cur: str = "", icons: Icons | None = None) -> str:
-    r, s = mc.report, mc.report.summary
-    m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
-    lines = [f"📊 <b>{month_title(s.start).capitalize()}</b> — итоги месяца", "", *format_totals(s, cur, r)]
-    if s.count == 0:
-        lines += ["", "За этот месяц операций нет."]
-    if mc.big:
-        share = f" · {fmt_percent(mc.big_total / s.income * 100)} дохода" if s.income > 0 else ""
-        lines += ["", f"🧾 Разовые траты: <b>{m(mc.big_total)}</b>{share}"]
-        lines += [f"• {fmt_short_date(b.date)} {html.escape(b.what) or 'покупка'} — {m(b.amount)}" for b in mc.big]
-        rate = f" · сбережения {fmt_percent(mc.balance_wo_big / s.income * 100)}" if s.income > 0 else ""
-        lines.append(f"Без разовых: расход {m(mc.expense_wo_big)} · сальдо {m(mc.balance_wo_big, True)}{rate}")
-    if r.avg_months:
-        months = ", ".join(MONTHS_SHORT[x.month - 1] for x in r.avg_months)
-        lines.append(f"<i>Сравнение — со средним за {len(r.avg_months)} мес. ({months})</i>")
-
-    lines.append("")
-    if mc.capital is None:
-        lines.append("💼 Снимок остатков на конец месяца не заполнен — /snapshot")
-    else:
-        lines += format_capital_block(mc.capital, cur)
-        diff = mc.reconcile_diff
-        if diff is not None:
-            lines.append(
-                f"Сверка: прирост {m(mc.capital.total_delta, True)} − сальдо {m(s.balance, True)} "
-                f"= <b>{m(diff, True)}</b> не учтено"
-            )
-            if mc.reconcile_warning:
-                lines.append("⚠️ Расхождение больше 10% дохода — похоже, часть трат или доходов не записана.")
-
-    if s.count:
-        lines += _sections(s, cur, icons, r)
-    roll = mc.rolling
-    if roll.count:
-        months = f"{MONTHS_SHORT[roll.start.month - 1]}–{MONTHS_SHORT[roll.end.month - 1]}"
-        rate = f" · сбережения {fmt_percent(roll.savings_rate)}" if roll.savings_rate is not None else ""
-        lines += ["", f"📆 <b>3 месяца ({months})</b>: доход {m(roll.income)}, расход {m(roll.expense)}, "
-                      f"сальдо {m(roll.balance, True)}{rate}"]
-    if not r.avg_months and s.count:
-        lines += ["", "Для сравнения со средним пока мало данных."]
-    if s.count:
-        lines += ["", report_conclusion(r, cur, icons)]
-    return "\n".join(lines)
-
-
-# ---------- квартальный отчет ----------
-
-QUARTER_START_MONTHS = (1, 4, 7, 10)
 
 
 def capital_at_month_end(balances: Sequence[BalanceEntry], month: date) -> Decimal | None:
@@ -786,69 +425,359 @@ def capital_at_month_end(balances: Sequence[BalanceEntry], month: date) -> Decim
     return candidates[-1][1] if candidates else None
 
 
+# ---------- итоги месяца (1 числа и /report) ----------
+
+LIST_LIMIT = 5
+
+
 @dataclass
-class QuarterReport:
-    months: list[date]                 # три полных месяца квартала
-    summary: Summary
-    monthly: list[Summary]
-    big_total: Decimal
-    capital_start: Decimal | None      # на конец месяца перед кварталом
-    capital_end: Decimal | None
+class MonthClose:
+    month: date
+    clean: Summary                 # без тяжелых
+    full: Summary                  # с тяжелыми
+    usual: Usual
+    heavy: list[BigPurchase]
+    capital: CapitalSummary | None
+
+    @property
+    def heavy_total(self) -> Decimal:
+        return sum((b.amount for b in self.heavy), ZERO)
 
 
-def quarter_report(ops: Sequence[Operation], bigs: Sequence[BigPurchase], balances: Sequence[BalanceEntry], today: date) -> QuarterReport:
-    """Квартал — три полных месяца перед текущим."""
-    first = add_months(month_start(today), -3)
-    months = [add_months(first, i) for i in range(3)]
-    last = month_end(months[-1])
-    return QuarterReport(
-        months=months,
-        summary=summarize(ops, first, last),
-        monthly=[summarize_month(ops, m) for m in months],
-        big_total=big_total(bigs, first, last),
-        capital_start=capital_at_month_end(balances, add_months(first, -1)),
-        capital_end=capital_at_month_end(balances, months[-1]),
+def month_close(
+    ops: Sequence[Operation],
+    bigs: Sequence[BigPurchase],
+    balances: Sequence[BalanceEntry],
+    month: date,
+    account_order: Sequence[str] = (),
+) -> MonthClose:
+    first, last = month_start(month), month_end(month)
+    cutoff = last + timedelta(days=SNAPSHOT_GRACE_DAYS)
+    capital = capital_summary([b for b in balances if b.date <= cutoff], ops, account_order)
+    if capital is not None and capital.date < last - timedelta(days=SNAPSHOT_GRACE_DAYS):
+        capital = None   # свежего снимка на начало следующего месяца нет
+    return MonthClose(
+        month=first,
+        clean=summarize_clean(ops, bigs, first, last),
+        full=summarize(ops, first, last),
+        usual=usual(ops, bigs, first),
+        heavy=heavy_items(ops, bigs, first, last),
+        capital=capital,
     )
 
 
-def quarter_title(q: QuarterReport) -> str:
-    a, b = q.months[0], q.months[-1]
-    return f"Квартал: {MONTHS_NOMINATIVE[a.month - 1]}–{MONTHS_NOMINATIVE[b.month - 1]} {b.year}"
+def above_below(mc: MonthClose) -> tuple[list[tuple[str, Decimal, Decimal]], list[tuple[str, Decimal, Decimal]]]:
+    """Категории выше и ниже обычного больше чем на 30%: (категория, за месяц, обычно)."""
+    if not mc.usual.months:
+        return [], []
+    current = dict(mc.clean.expense_by_category)
+    above, below = [], []
+    for name in set(current) | set(mc.usual.by_category):
+        amount, avg = current.get(name, ZERO), mc.usual.by_category.get(name, ZERO)
+        if max(amount, avg) < MIN_NOTABLE or avg <= 0:
+            continue
+        if amount > avg * (1 + Decimal(DEVIATION_PCT) / 100):
+            above.append((name, amount, avg))
+        elif amount < avg * (1 - Decimal(DEVIATION_PCT) / 100):
+            below.append((name, amount, avg))
+    above.sort(key=lambda x: -(x[1] - x[2]))
+    below.sort(key=lambda x: -(x[2] - x[1]))
+    return above[:LIST_LIMIT], below[:LIST_LIMIT]
 
 
-def format_quarter(q: QuarterReport, cur: str = "") -> str:
-    s = q.summary
-    m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
-    lines = [f"📈 <b>{quarter_title(q)}</b>", "", *format_totals(s, cur)]
-    if q.big_total:
-        wo = s.income - max(s.expense - q.big_total, ZERO)
-        rate = f" · сбережения {fmt_percent(wo / s.income * 100)}" if s.income > 0 else ""
-        lines.append(f"🧾 Разовые: {m(q.big_total)} · без них сальдо {m(wo, True)}{rate}")
-    if q.capital_end is not None:
-        line = f"💼 Капитал на конец квартала: <b>{m(q.capital_end)}</b>"
-        if q.capital_start is not None:
-            line += f" ({m(q.capital_end - q.capital_start, True)} за квартал)"
-        lines.append(line)
-    lines += ["", "<b>По месяцам</b>"]
-    for ms in q.monthly:
-        mark = "🟢" if ms.balance >= 0 else "🔴"
-        lines.append(f"{mark} {MONTHS_SHORT[ms.start.month - 1]}: доход {m(ms.income)} · расход {m(ms.expense)} · сальдо {m(ms.balance, True)}")
+def _usual_line(name: str, amount: Decimal, avg: Decimal, cur: str, icons: Icons | None) -> str:
+    return f"{_label(icons, OpType.EXPENSE, name)} {fmt_k(amount, cur)} · обычно {fmt_k(avg)}"
+
+
+def _capital_start_line(c: CapitalSummary | None, cur: str) -> str:
+    if c is None:
+        return "💼 Капитал: снимок остатков не заполнен — /snapshot"
+    line = f"💼 Капитал на {_on_date(c.date)} <b>{fmt_k(c.total, cur)}</b>"
+    if c.prev_date is not None:
+        line += f" (на {_on_date(c.prev_date)} {fmt_k(c.prev_total)}, {fmt_k(c.total_delta, signed=True)})"
+    return line
+
+
+def format_month_close(mc: MonthClose, cur: str = "", icons: Icons | None = None) -> str:
+    s = mc.clean
+    lines = [
+        f"📊 <b>{MONTHS_NOMINATIVE[mc.month.month - 1].capitalize()}</b> без тяжелых трат",
+        f"💰 Доход <b>{fmt_k(s.income, cur)}</b>",
+        f"💸 Расход <b>{fmt_k(s.expense, cur)}</b>",
+        _result_line(s.balance, cur),
+        _capital_start_line(mc.capital, cur),
+    ]
+    if s.count == 0 and not mc.heavy:
+        lines += ["", "За этот месяц записей нет."]
+        return "\n".join(lines)
+    above, below = above_below(mc)
+    if above:
+        lines += ["", "<b>Выше обычного:</b>", *(_usual_line(*x, cur, icons) for x in above)]
+    if below:
+        lines += ["", "<b>Ниже обычного:</b>", *(_usual_line(*x, cur, icons) for x in below)]
+    if not mc.usual.months:
+        lines += ["", "Сравнивать пока не с чем — «обычно» появится после первого полного месяца."]
+    if mc.heavy:
+        lines += ["", f"🧾 Тяжелые траты: {len(mc.heavy)} на {fmt_k(mc.heavy_total, cur)}"]
     return "\n".join(lines)
 
 
-def chart_series(ops: Sequence[Operation], balances: Sequence[BalanceEntry], today: date, n: int = 12):
-    """Данные для картинки: последние n полных месяцев (без текущего)."""
-    months = [add_months(month_start(today), -i) for i in range(n, 0, -1)]
-    sums = [summarize_month(ops, mo) for mo in months]
-    # обрезать пустые месяцы в начале истории
-    while len(months) > 3 and sums[0].count == 0 and capital_at_month_end(balances, months[0]) is None:
-        months, sums = months[1:], sums[1:]
-    return (
-        months,
-        [s.income for s in sums],
-        [s.expense for s in sums],
-        [capital_at_month_end(balances, mo) for mo in months],
+def format_heavy_list(items: Sequence[BigPurchase], cur: str = "", icons: Icons | None = None) -> list[str]:
+    lines = []
+    for b in items:
+        icon = _icon(icons, OpType.EXPENSE, b.category) if b.category else "❔ "
+        lines.append(f"{fmt_short_date(b.date)} {icon}{html.escape(b.what) or 'покупка'} — {fmt_money(b.amount, cur)}")
+    return lines
+
+
+NO_CATEGORY_HINT = (
+    "❔ — категория не указана: такая трата вычитается только из общего расхода. "
+    "Впишите категорию в лист «Большие покупки», затем /refresh."
+)
+
+
+def heavy_year(ops: Sequence[Operation], bigs: Sequence[BigPurchase], last: date) -> tuple[int, Decimal, Decimal]:
+    """За 12 месяцев до конца `last`: (число тяжелых трат, их сумма, доля в расходах, %)."""
+    start = add_months(month_start(last), -11)
+    items = heavy_items(ops, bigs, start, last)
+    total = sum((b.amount for b in items), ZERO)
+    expense = summarize(ops, start, last).expense
+    return len(items), total, (total / expense * 100 if expense > 0 else ZERO)
+
+
+def format_month_heavy(
+    mc: MonthClose, ops: Sequence[Operation], bigs: Sequence[BigPurchase], cur: str = "", icons: Icons | None = None,
+) -> str:
+    title = f"🧾 <b>Тяжелые траты</b> · {MONTHS_NOMINATIVE[mc.month.month - 1]}"
+    if not mc.heavy:
+        lines = [title, "В этом месяце тяжелых трат нет."]
+    else:
+        lines = [title, *format_heavy_list(mc.heavy, cur, icons)]
+        f = mc.full
+        lines += [
+            "", "<b>С ними месяц выглядит так:</b>",
+            f"💸 Расход {fmt_k(f.expense, cur)} (без них {fmt_k(mc.clean.expense)})",
+            _result_line(f.balance, cur) + f" (без них {fmt_k(mc.clean.balance, signed=True)})",
+        ]
+        clean_cats, full_cats = dict(mc.clean.expense_by_category), dict(f.expense_by_category)
+        touched = sorted({b.category for b in mc.heavy if b.category}, key=lambda n: -full_cats.get(n, ZERO))
+        for name in touched:
+            lines.append(
+                f"{_label(icons, OpType.EXPENSE, name)} {fmt_k(full_cats.get(name, ZERO), cur)} "
+                f"(без них {fmt_k(clean_cats.get(name, ZERO))})"
+            )
+        if any(not b.category for b in mc.heavy):
+            lines += ["", NO_CATEGORY_HINT]
+    n, total, share = heavy_year(ops, bigs, month_end(mc.month))
+    if n:
+        lines += ["", f"За 12 месяцев: {n} трат на {fmt_k(total, cur)} · {fmt_percent(share)} всех расходов"]
+    return "\n".join(lines)
+
+
+def format_month_categories(mc: MonthClose, cur: str = "", icons: Icons | None = None) -> str:
+    title = f"📋 <b>{MONTHS_NOMINATIVE[mc.month.month - 1].capitalize()}</b>: все категории без тяжелых трат"
+    return format_all_categories(title, mc.clean, cur, icons)
+
+
+# ---------- статистика за несколько месяцев (/stats) ----------
+
+TREND_MIN_CHANGE = Decimal(2000)
+STATS_PERIODS = (3, 6, 12)
+QUARTER_START_MONTHS = (1, 4, 7, 10)
+
+
+@dataclass
+class Trend:
+    name: str
+    before: Decimal     # среднее в первой половине периода
+    after: Decimal      # среднее во второй половине
+
+
+@dataclass
+class Stats:
+    months: list[date]
+    monthly: list[Summary]                  # без тяжелых
+    capital: list[Decimal | None]           # на конец каждого месяца
+    capital_before: Decimal | None          # на конец месяца перед периодом
+    rising: list[Trend]
+    falling: list[Trend]
+    heavy: list[BigPurchase]
+
+    @property
+    def capital_change(self) -> Decimal | None:
+        end = self.capital[-1] if self.capital else None
+        if end is None or self.capital_before is None:
+            return None
+        return end - self.capital_before
+
+    def category_series(self, top: int = 6) -> dict[str, list[Decimal]]:
+        """Помесячные суммы для самых крупных категорий периода (для графиков)."""
+        totals: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        for s in self.monthly:
+            for name, amount in s.expense_by_category:
+                totals[name] += amount
+        names = [n for n, _ in sorted(totals.items(), key=lambda kv: -kv[1])[:top]]
+        return {n: [dict(s.expense_by_category).get(n, ZERO) for s in self.monthly] for n in names}
+
+
+def stats(ops: Sequence[Operation], bigs: Sequence[BigPurchase], balances: Sequence[BalanceEntry], today: date, n: int = 3) -> Stats:
+    """n полных месяцев перед текущим."""
+    first = add_months(month_start(today), -n)
+    months = [add_months(first, i) for i in range(n)]
+    monthly = [summarize_clean_month(ops, bigs, m) for m in months]
+    with_data = [s for s in monthly if s.count]
+    rising, falling = [], []
+    if len(with_data) >= 2:
+        half = max(1, len(with_data) // 2)
+        early, late = with_data[:half], with_data[-half:]
+        names = {name for s in with_data for name, _ in s.expense_by_category}
+        for name in names:
+            before = sum((dict(s.expense_by_category).get(name, ZERO) for s in early), ZERO) / len(early)
+            after = sum((dict(s.expense_by_category).get(name, ZERO) for s in late), ZERO) / len(late)
+            if abs(after - before) < TREND_MIN_CHANGE:
+                continue
+            if before > 0 and after > before * (1 + Decimal(DEVIATION_PCT) / 100) or before == 0 and after > 0:
+                rising.append(Trend(name, before, after))
+            elif after < before * (1 - Decimal(DEVIATION_PCT) / 100):
+                falling.append(Trend(name, before, after))
+        rising.sort(key=lambda t: -(t.after - t.before))
+        falling.sort(key=lambda t: -(t.before - t.after))
+    return Stats(
+        months=months,
+        monthly=monthly,
+        capital=[capital_at_month_end(balances, m) for m in months],
+        capital_before=capital_at_month_end(balances, add_months(first, -1)),
+        rising=rising[:LIST_LIMIT],
+        falling=falling[:LIST_LIMIT],
+        heavy=heavy_items(ops, bigs, first, month_end(months[-1])),
     )
+
+
+def stats_title(st: Stats) -> str:
+    return period_title(st.months[0], st.months[-1])
+
+
+def format_stats(st: Stats, cur: str = "", icons: Icons | None = None) -> str:
+    lines = [f"📈 <b>{stats_title(st)}</b>, без тяжелых", ""]
+    trend = lambda t: f"{_label(icons, OpType.EXPENSE, t.name)} ({fmt_k(t.before)} → {fmt_k(t.after, cur)})"  # noqa: E731
+    if not any(s.count for s in st.monthly):
+        lines.append("За этот период записей нет.")
+    else:
+        if st.rising:
+            lines.append("• Расходы растут: " + ", ".join(trend(t) for t in st.rising))
+        if st.falling:
+            lines.append("• Расходы снижаются: " + ", ".join(trend(t) for t in st.falling))
+        if not st.rising and not st.falling:
+            lines.append("• Расходы по категориям без заметных изменений")
+    change = st.capital_change
+    if change is not None:
+        verb = "вырос" if change >= 0 else "уменьшился"
+        lines.append(f"• Капитал {verb} на {fmt_k(abs(change), cur)}")
+    if st.heavy:
+        lines += ["", f"🧾 Тяжелые: {fmt_k(sum((b.amount for b in st.heavy), ZERO), cur)}"]
+    return "\n".join(lines)
+
+
+def format_stats_heavy(st: Stats, cur: str = "", icons: Icons | None = None) -> str:
+    lines = [f"🧾 <b>Тяжелые траты</b> · {stats_title(st)}"]
+    if not st.heavy:
+        lines.append("За этот период тяжелых трат нет.")
+        return "\n".join(lines)
+    lines += format_heavy_list(st.heavy, cur, icons)
+    lines.append(f"Всего: {fmt_k(sum((b.amount for b in st.heavy), ZERO), cur)}")
+    if any(not b.category for b in st.heavy):
+        lines += ["", NO_CATEGORY_HINT]
+    return "\n".join(lines)
+
+
+# ---------- категория (/cat) ----------
+
+def format_category_report(
+    name: str,
+    ops: Sequence[Operation],
+    bigs: Sequence[BigPurchase],
+    today: date,
+    cur: str = "",
+    max_items: int = 20,
+    icon: str = "",
+) -> str:
+    first = month_start(today)
+    in_cat = [op for op in ops if op.category == name and op.type != OpType.TRANSFER]
+    current = sorted((op for op in in_cat if first <= op.date <= today), key=lambda o: o.date, reverse=True)
+    total = sum((op.amount for op in current), ZERO)
+    head = f"{icon} " if icon else "🏷 "
+    lines = [f"{head}<b>{html.escape(name)}</b> — {month_title(first)}", f"Итого: <b>{fmt_money(total, cur)}</b>"]
+    for op in current[:max_items]:
+        comment = f" {html.escape(op.comment)}" if op.comment else ""
+        heavy = " 🧾" if is_heavy(op) else ""
+        lines.append(f"{fmt_short_date(op.date)} · {fmt_money(op.amount, cur)}{comment}{heavy}")
+    if len(current) > max_items:
+        lines.append(f"… и еще {len(current) - max_items}")
+    hist = []
+    for i in range(1, 4):
+        m = add_months(first, -i)
+        amount = dict(summarize_clean_month(ops, bigs, m).expense_by_category).get(name, ZERO)
+        hist.append(f"{MONTHS_SHORT[m.month - 1]} {m.year}: {fmt_money(amount, cur)}")
+    lines += ["", "<b>Прошлые месяцы</b> (без тяжелых):", *hist]
+    avg = usual(ops, bigs, first).by_category.get(name)
+    if avg:
+        lines.append(f"Обычно: <b>{fmt_money(avg, cur)}</b> в месяц")
+    return "\n".join(lines)
+
+
+# ---------- сравнение двух месяцев (/compare) ----------
+
+def format_compare(
+    ops: Sequence[Operation], bigs: Sequence[BigPurchase], m1: date, m2: date, cur: str = "", icons: Icons | None = None,
+) -> str:
+    a, b = summarize_clean_month(ops, bigs, m1), summarize_clean_month(ops, bigs, m2)
+
+    def row(label: str, x: Decimal, y: Decimal, signed: bool = False) -> str:
+        return (f"{label} {fmt_k(x, signed=signed)} → <b>{fmt_k(y, cur, signed=signed)}</b>  "
+                f"{deviation(y, x) if not signed else ''}").rstrip()
+
+    lines = [
+        f"⚖️ <b>{month_title(m1).capitalize()} → {month_title(m2)}</b>, без тяжелых", "",
+        row("💰 Доход", a.income, b.income),
+        row("💸 Расход", a.expense, b.expense),
+        row("🟢 Итог" if b.balance >= 0 else "🔴 Итог", a.balance, b.balance, signed=True),
+    ]
+    for title, op_type, xs, ys in (
+        ("💸 Расходы", OpType.EXPENSE, dict(a.expense_by_category), dict(b.expense_by_category)),
+        ("💰 Доходы", OpType.INCOME, dict(a.income_by_category), dict(b.income_by_category)),
+    ):
+        names = sorted(set(xs) | set(ys), key=lambda n: (-max(xs.get(n, ZERO), ys.get(n, ZERO)), n))
+        if not names:
+            continue
+        lines += ["", f"<b>{title}</b>"]
+        for n in names:
+            x, y = xs.get(n, ZERO), ys.get(n, ZERO)
+            mark = "🆕" if x == 0 else ("не было" if y == 0 else deviation(y, x))
+            lines.append(f"{_label(icons, op_type, n)}: {fmt_money(x, cur)} → {fmt_money(y, cur)}  {mark}".rstrip())
+    if not (a.count or b.count):
+        lines += ["", "За эти месяцы записей нет."]
+    return "\n".join(lines)
+
+
+# ---------- тяжелые траты за год (/big) ----------
+
+def format_big(
+    ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date, cur: str = "", icons: Icons | None = None,
+    limit: int = 30,
+) -> str:
+    start = add_months(month_start(today), -11)
+    items = sorted(heavy_items(ops, bigs, start, today), key=lambda b: b.date, reverse=True)
+    n, total, share = heavy_year(ops, bigs, today)
+    head = f"🧾 <b>Тяжелые траты</b> с {MONTHS_SHORT[start.month - 1]} {start.year}"
+    if not items:
+        return f"{head}\nПока нет. Пометьте трату тегом: <code>283000 отпуск #тяжелое</code>"
+    lines = [f"{head}: {n} на <b>{fmt_k(total, cur)}</b> · {fmt_percent(share)} всех расходов", ""]
+    lines += format_heavy_list(items[:limit], cur, icons)
+    if len(items) > limit:
+        lines.append(f"… и еще {len(items) - limit}")
+    if any(not b.category for b in items):
+        lines += ["", NO_CATEGORY_HINT]
+    return "\n".join(lines)
 
 
 # ---------- мягкие сигналы ----------
@@ -858,48 +787,36 @@ OTHER_SHARE = Decimal("0.10")
 OTHER_FROM_DAY = 10
 
 
-def category_month_averages(ops: Sequence[Operation], today: date, window: int = 3) -> dict[str, Decimal]:
-    """Средний расход по категориям за полный месяц (прошлые месяцы с операциями, текущий не входит)."""
-    prev = [summarize_month(ops, add_months(month_start(today), -i)) for i in range(1, window + 1)]
-    prev = [p for p in prev if p.count]
-    if not prev:
-        return {}
-    totals: dict[str, Decimal] = defaultdict(lambda: ZERO)
-    for p in prev:
-        for name, amount in p.expense_by_category:
-            totals[name] += amount
-    return {k: v / len(prev) for k, v in totals.items()}
-
-
 def find_signals(
     ops: Sequence[Operation],
+    bigs: Sequence[BigPurchase],
     balances: Sequence[BalanceEntry],
     today: date,
     cur: str = "",
     icons: Icons | None = None,
 ) -> list[tuple[str, str]]:
-    """Список (ключ, текст). Ключ нужен, чтобы один и тот же сигнал не повторялся."""
+    """Список (ключ, текст). Ключ нужен, чтобы один и тот же сигнал не повторялся. Всё без тяжелых трат."""
     out: list[tuple[str, str]] = []
     first = month_start(today)
     key_month = first.strftime("%Y-%m")
-    s = summarize(ops, first, today)
+    s = summarize_clean(ops, bigs, first, today)
 
     if today.day >= SIGNAL_CATEGORY_FROM_DAY:
-        avgs = category_month_averages(ops, today)
+        avgs = usual(ops, bigs, today).by_category
         for name, amount in s.expense_by_category:
             avg = avgs.get(name)
             if avg and amount > avg:
                 out.append((
                     f"cat:{key_month}:{name}",
-                    f"{_icon(icons, OpType.EXPENSE, name)}{html.escape(name)}: уже {fmt_money(amount, cur)} к {today.day}-му — "
-                    f"больше, чем обычно уходит за весь месяц (≈ {fmt_money(avg.quantize(Decimal(1)), cur)})",
+                    f"{_label(icons, OpType.EXPENSE, name)}: уже {fmt_money(amount, cur)} к {today.day}-му — "
+                    f"больше, чем обычно уходит за весь месяц ({fmt_money(avg, cur)})",
                 ))
 
     other = dict(s.expense_by_category).get("Прочее", ZERO)
     if today.day >= OTHER_FROM_DAY and s.expense > 0 and other > s.expense * OTHER_SHARE:
         out.append((
             f"other:{key_month}",
-            f"{_icon(icons, OpType.EXPENSE, 'Прочее')}«Прочее» — {fmt_percent(other / s.expense * 100)} расходов месяца "
+            f"{_label(icons, OpType.EXPENSE, 'Прочее')} — {fmt_percent(other / s.expense * 100)} расходов месяца "
             f"({fmt_money(other, cur)}). Возможно, стоит разнести по категориям или завести новую.",
         ))
 

@@ -166,13 +166,13 @@ def test_monthly_snapshot_ends_with_month_close(h):
     out = []
     for _ in range(q.total):
         out = h.text("1000")
-    assert "итоги месяца" in texts(out)[0]
+    assert "📊" in texts(out)[0] and "без тяжелых трат" in texts(out)[0]
     assert h.svc.state.month_closed("2026-10")
     # обычный /snapshot заканчивается сводкой /capital
     h.text("/snapshot")
     for _ in range(q.total):
         out = h.text("1000")
-    assert "итоги месяца" not in texts(out)[0] and "💼" in texts(out)[0]
+    assert "📊" not in texts(out)[0] and "💼" in texts(out)[0]
 
 
 def test_fallback_job_sends_once(h):
@@ -180,7 +180,7 @@ def test_fallback_job_sends_once(h):
     n = len(h.session.sent)
     asyncio.run(monthly_fallback_job(h.bot, h.svc, frozenset({1})))
     asyncio.run(monthly_fallback_job(h.bot, h.svc, frozenset({1})))
-    sent = [m for m in h.session.sent[n:] if "итоги месяца" in (getattr(m, "text", "") or "")]
+    sent = [m for m in h.session.sent[n:] if "📊" in (getattr(m, "text", "") or "")]
     assert len(sent) == 1
 
 
@@ -194,6 +194,9 @@ def test_signals_command_and_quarter(h):
     assert "выключены" in texts(h.text("/signals off"))[0]
     assert h.svc.state.get("signals_enabled") is False
     assert "включены" in texts(h.text("/сигналы on"))[0]
+    from bot.models import Operation
+    from decimal import Decimal
+    h.svc.storage.operations.append(Operation(datetime.date(2026, 9, 5), OpType.EXPENSE, Decimal(100), "Досуг"))
     out = h.text("/quarter")
     from aiogram.methods import SendPhoto
     assert any(isinstance(m, SendPhoto) for m in out)
@@ -203,7 +206,9 @@ def test_signals_command_and_quarter(h):
 def test_month_close_on_quarter_start_sends_chart():
     from aiogram.methods import SendPhoto
     from bot.notify import send_month_close
-    hh = Harness(MemoryStorage())
+    from bot.models import Operation
+    from decimal import Decimal
+    hh = Harness(MemoryStorage(operations=[Operation(datetime.date(2026, 9, 5), OpType.EXPENSE, Decimal(100), "Досуг")]))
     hh.svc._today_fn = lambda: datetime.date(2026, 10, 1)
     asyncio.run(send_month_close(hh.bot, 1, hh.svc))
     assert any(isinstance(m, SendPhoto) for m in hh.session.sent)
@@ -211,3 +216,37 @@ def test_month_close_on_quarter_start_sends_chart():
     hh.svc._today_fn = lambda: datetime.date(2026, 11, 1)
     asyncio.run(send_month_close(hh.bot, 1, hh.svc))
     assert not any(isinstance(m, SendPhoto) for m in hh.session.sent)
+
+
+
+def test_report_buttons_switch_views(h):
+    from bot.models import Operation
+    from decimal import Decimal
+    h.svc.storage.operations += [
+        Operation(datetime.date(2026, 9, 5), OpType.EXPENSE, Decimal(5000), "Досуг"),
+        Operation(datetime.date(2026, 9, 6), OpType.EXPENSE, Decimal(283122), "Досуг", tags=["тяжелое"], comment="отпуск"),
+    ]
+    out = h.text("/report")
+    kb = buttons(out)
+    assert set(kb) == {"🧾 Тяжелые траты", "📋 Все категории"}
+    out = h.click(kb["🧾 Тяжелые траты"])
+    assert "отпуск" in texts(out)[0] and set(buttons(out)) == {"← Назад"}
+    out = h.click(buttons(out)["← Назад"])
+    assert "без тяжелых трат" in texts(out)[0]
+
+
+def test_month_buttons(h):
+    h.text("350 кофе")
+    out = h.text("/month")
+    kb = buttons(out)
+    assert set(kb) == {"📋 Все категории", "🕑 Последние траты"}
+    out = h.click(kb["🕑 Последние траты"])
+    assert "кофе" in texts(out)[0]
+    assert "Больше всего" in texts(h.click(buttons(out)["← Назад"]))[0]
+
+
+def test_stats_period_argument(h):
+    out = h.text("/stats 6")
+    assert "Апрель – сентябрь" in texts(out)[-1]
+    out = h.text("/stats 5")
+    assert "3, 6 или 12" in texts(out)[0]

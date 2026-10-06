@@ -204,11 +204,11 @@ class FinanceService:
 
     def describe(self, op: Operation) -> str:
         if op.type == OpType.TRANSFER:
-            head = f"🔁 Перевод {fmt_money(op.amount, self.cur)}: {html.escape(op.account)} → {html.escape(op.to_account)}"
+            head = f"🔁 Перевод {fmt_money(op.amount, self.cur, exact=True)}: {html.escape(op.account)} → {html.escape(op.to_account)}"
         elif op.type == OpType.INCOME:
-            head = f"🟢 Доход {fmt_money(op.amount, self.cur)} · {html.escape(self.cat_label(op.type, op.category) or '?')}"
+            head = f"🟢 Доход {fmt_money(op.amount, self.cur, exact=True)} · {html.escape(self.cat_label(op.type, op.category) or '?')}"
         else:
-            head = f"🔴 Расход {fmt_money(op.amount, self.cur)} · {html.escape(self.cat_label(op.type, op.category) or '?')}"
+            head = f"🔴 Расход {fmt_money(op.amount, self.cur, exact=True)} · {html.escape(self.cat_label(op.type, op.category) or '?')}"
         parts = [head, fmt_short_date(op.date)]
         if op.comment:
             parts.append(html.escape(op.comment))
@@ -225,25 +225,38 @@ class FinanceService:
         sign = {OpType.INCOME: "+", OpType.EXPENSE: "−", OpType.TRANSFER: "⇄"}[op.type]
         what = self.cat_label(op.type, op.category) if op.type != OpType.TRANSFER else f"{op.account}→{op.to_account}"
         comment = f" {op.comment}" if op.comment else ""
-        return html.escape(f"{fmt_short_date(op.date)} {sign}{fmt_money(op.amount, self.cur)} {what}{comment}")
+        return html.escape(f"{fmt_short_date(op.date)} {sign}{fmt_money(op.amount, self.cur, exact=True)} {what}{comment}")
 
     # ---------- отчеты ----------
 
-    async def month_text(self) -> str:
-        today = self.today()
-        ops = await self.storage.list_operations()
-        s = reports.summarize(ops, reports.month_start(today), today)
+    async def _data(self):
+        """Операции, тяжелые траты и иконки категорий — то, что нужно почти каждому отчету."""
         await self._categories()
-        spent, expected = reports.month_pace(ops, await self.storage.list_big_purchases(), today)
-        pace = reports.format_pace(spent, expected, today, self.cur)
-        return reports.format_month(s, today, self.cur, self._icons, pace=pace)
+        return await self.storage.list_operations(), await self.storage.list_big_purchases()
+
+    async def month_text(self, view: str = "main") -> str:
+        """Текущий месяц: "main" — сводка, "all" — все категории, "last" — последние траты."""
+        today = self.today()
+        ops, bigs = await self._data()
+        first = reports.month_start(today)
+        s = reports.summarize(ops, first, today)
+        if view == "all":
+            return reports.format_all_categories(f"📋 {reports.month_now_title(today)}: все категории", s, self.cur, self._icons)
+        if view == "last":
+            recent = [op for op in ops if first <= op.date <= today and op.type == OpType.EXPENSE][-15:]
+            lines = [f"🕑 {reports.month_now_title(today)}: последние траты"]
+            lines += [self.describe_short(op) for op in reversed(recent)] or ["Трат пока нет."]
+            return "\n".join(lines)
+        heavy = sum((b.amount for b in reports.heavy_items(ops, bigs, first, today)), Decimal(0))
+        return reports.format_now(reports.month_now_title(today), s, heavy, self.cur, self._icons)
 
     async def week_text(self) -> str:
         today = self.today()
-        ops = await self.storage.list_operations()
-        s = reports.summarize(ops, reports.week_start(today), today)
-        await self._categories()
-        return reports.format_week(s, self.cur, self._icons)
+        ops, bigs = await self._data()
+        start = reports.week_start(today)
+        s = reports.summarize(ops, start, today)
+        heavy = sum((b.amount for b in reports.heavy_items(ops, bigs, start, today)), Decimal(0))
+        return reports.format_now(reports.week_title(start, today), s, heavy, self.cur, self._icons)
 
     async def category_text(self, query: str) -> str:
         cats = find_category(query, await self._categories())
@@ -252,30 +265,54 @@ class FinanceService:
             return f"Категория «{html.escape(query)}» не найдена. Список: /categories"
         if len(names) > 1:
             return "Уточните категорию: " + ", ".join(html.escape(n) for n in names)
-        ops = await self.storage.list_operations()
+        ops, bigs = await self._data()
         icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
-        return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
+        return reports.format_category_report(names[0], ops, bigs, self.today(), self.cur, icon=icon)
 
-    async def quarter_report(self) -> tuple[str, bytes | None]:
-        """Текст квартального отчета (три полных месяца перед текущим) и картинка."""
-        ops = await self.storage.list_operations()
-        balances = await self.storage.list_balances()
-        q = reports.quarter_report(ops, await self.storage.list_big_purchases(), balances, self.today())
+    async def month_close(self, month: date | None = None) -> reports.MonthClose:
+        month = reports.month_start(month or reports.add_months(self.today(), -1))
+        ops, bigs = await self._data()
+        accounts = [a.name for a in await self.storage.list_accounts()]
+        return reports.month_close(ops, bigs, await self.storage.list_balances(), month, accounts)
+
+    async def month_close_text(self, month: date | None = None, view: str = "main") -> str:
+        """Итоги месяца (по умолчанию прошлого): "main", "heavy" — тяжелые траты, "all" — все категории."""
+        mc = await self.month_close(month)
+        if view == "heavy":
+            ops, bigs = await self._data()
+            return reports.format_month_heavy(mc, ops, bigs, self.cur, self._icons)
+        if view == "all":
+            return reports.format_month_categories(mc, self.cur, self._icons)
+        return reports.format_month_close(mc, self.cur, self._icons)
+
+    monthly_report_text = month_close_text
+
+    async def stats(self, n: int = 3) -> reports.Stats:
+        ops, bigs = await self._data()
+        return reports.stats(ops, bigs, await self.storage.list_balances(), self.today(), n)
+
+    async def stats_report(self, n: int = 3) -> tuple[str, bytes | None]:
+        """Текст /stats и картинка с графиками."""
+        st = await self.stats(n)
         png = None
-        try:
-            from .charts import quarter_chart
+        if any(s.count for s in st.monthly):
+            try:
+                from .charts import stats_chart
 
-            months, inc, exp, cap = reports.chart_series(ops, balances, self.today())
-            png = await asyncio.to_thread(quarter_chart, months, inc, exp, cap, reports.quarter_title(q))
-        except Exception:
-            log.exception("Не удалось нарисовать график")
-        return reports.format_quarter(q, self.cur), png
+                png = await asyncio.to_thread(
+                    stats_chart, st.months, [s.income for s in st.monthly], [s.expense for s in st.monthly],
+                    st.capital, st.category_series(), f"{reports.stats_title(st)} · без тяжелых трат",
+                )
+            except Exception:
+                log.exception("Не удалось нарисовать графики")
+        return reports.format_stats(st, self.cur, self._icons), png
+
+    async def stats_heavy_text(self, n: int = 3) -> str:
+        return reports.format_stats_heavy(await self.stats(n), self.cur, self._icons)
 
     async def signals(self) -> list[tuple[str, str]]:
-        await self._categories()
-        return reports.find_signals(
-            await self.storage.list_operations(), await self.storage.list_balances(), self.today(), self.cur, self._icons,
-        )
+        ops, bigs = await self._data()
+        return reports.find_signals(ops, bigs, await self.storage.list_balances(), self.today(), self.cur, self._icons)
 
     async def compare_text(self, args: str | None) -> str:
         from .import_budget import parse_month_label
@@ -285,9 +322,8 @@ class FinanceService:
             m2 = reports.add_months(today, -1)
             m1 = reports.add_months(today, -2)
         else:
-            tokens = args.split()
             labels: list[str] = []
-            for t in tokens:   # «сентябрь 2025» — год приклеивается к месяцу
+            for t in args.split():   # «сентябрь 2025» — год приклеивается к месяцу
                 if labels and t.isdigit() and len(t) == 4:
                     labels[-1] += f" {t}"
                 else:
@@ -297,26 +333,12 @@ class FinanceService:
                 return ("Укажите два месяца: <code>/compare август сентябрь</code> "
                         "или <code>/compare 08.2026 09.2026</code>")
             m1, m2 = months
-        await self._categories()
-        return reports.format_compare(await self.storage.list_operations(), m1, m2, self.cur, self._icons)
+        ops, bigs = await self._data()
+        return reports.format_compare(ops, bigs, m1, m2, self.cur, self._icons)
 
     async def big_text(self) -> str:
-        return reports.format_big(
-            await self.storage.list_big_purchases(), await self.storage.list_operations(), self.today(), self.cur,
-        )
-
-    async def month_close_text(self, month: date | None = None) -> str:
-        """Итоги месяца (по умолчанию — прошлого): операции, разовые траты, капитал и сверка."""
-        month = reports.month_start(month or reports.add_months(self.today(), -1))
-        ops = await self.storage.list_operations()
-        accounts = [a.name for a in await self.storage.list_accounts()]
-        mc = reports.month_close(
-            ops, await self.storage.list_big_purchases(), await self.storage.list_balances(), month, accounts,
-        )
-        await self._categories()
-        return reports.format_month_close(mc, self.cur, self._icons)
-
-    monthly_report_text = month_close_text
+        ops, bigs = await self._data()
+        return reports.format_big(ops, bigs, self.today(), self.cur, self._icons)
 
     async def categories_text(self) -> str:
         cats = await self._categories()

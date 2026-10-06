@@ -1,7 +1,6 @@
 """Отправка итогов месяца, квартального отчета и сигналов (общая для команд и планировщика)."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -16,22 +15,28 @@ log = logging.getLogger(__name__)
 SIGNALS_MIN_INTERVAL = timedelta(days=7)
 
 
-async def send_quarter(bot: Bot, chat_id: int, svc: FinanceService) -> None:
-    text, png = await svc.quarter_report()
+async def send_stats(bot: Bot, chat_id: int, svc: FinanceService, n: int = 3) -> None:
+    """Картинка с графиками и текст с выводами (/stats; 1 янв/апр/июл/окт — за 3 месяца)."""
+    from .handlers import stats_keyboard
+
+    text, png = await svc.stats_report(n)
     if png:
-        await bot.send_photo(chat_id, BufferedInputFile(png, "quarter.png"))
-    await bot.send_message(chat_id, text)
+        await bot.send_photo(chat_id, BufferedInputFile(png, "stats.png"))
+    await bot.send_message(chat_id, text, reply_markup=stats_keyboard(n, "main"))
 
 
 async def send_month_close(bot: Bot, chat_id: int, svc: FinanceService) -> None:
-    """Итоги прошлого месяца; 1 января/апреля/июля/октября — еще и квартальный отчет с картинкой."""
-    await bot.send_message(chat_id, await svc.month_close_text())
+    """Итоги прошлого месяца с кнопками; 1 января/апреля/июля/октября — еще и /stats за квартал."""
+    from .handlers import report_keyboard
+
+    month = reports.add_months(svc.today(), -1)
+    await bot.send_message(chat_id, await svc.month_close_text(month), reply_markup=report_keyboard(month, "main"))
     svc.state.mark_month_closed(svc.today().strftime("%Y-%m"))
     if svc.today().month in reports.QUARTER_START_MONTHS:
         try:
-            await send_quarter(bot, chat_id, svc)
+            await send_stats(bot, chat_id, svc, 3)
         except Exception:
-            log.exception("Не удалось отправить квартальный отчет")
+            log.exception("Не удалось отправить квартальную статистику")
 
 
 async def send_signals(bot: Bot, chat_ids, svc: FinanceService, now: datetime | None = None) -> bool:

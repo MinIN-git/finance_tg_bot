@@ -1,6 +1,5 @@
 from datetime import date
 
-import pytest
 from decimal import Decimal
 
 from bot import reports
@@ -35,15 +34,8 @@ def test_summarize_basic():
     assert s.income == 100000
     assert s.expense == 38000
     assert s.balance == 62000
-    assert s.savings_rate == 62
     assert s.expense_by_category == [("Ипотека", Decimal(30000)), ("Продукты домой", Decimal(8000))]
     assert s.count == 4
-
-
-def test_savings_rate_without_income():
-    s = reports.summarize([op(date(2026, 9, 2), E, 100)], date(2026, 9, 1), date(2026, 9, 30))
-    assert s.savings_rate is None
-    assert s.balance == -100
 
 
 def test_tags():
@@ -67,89 +59,6 @@ def _history():
     ops.append(op(date(2026, 9, 10), E, 60000, "Продукты домой"))
     ops.append(op(date(2026, 9, 11), E, 30000, "Досуг", ["командировка"]))
     return ops
-
-
-def test_monthly_report_average():
-    r = reports.monthly_report(_history(), date(2026, 9, 1))
-    assert r.summary.expense == 90000
-    assert r.summary.income == 120000
-    assert r.avg_expense == 50000
-    assert r.avg_income == 100000
-    assert r.avg_months == [date(2026, 6, 1), date(2026, 7, 1), date(2026, 8, 1)]
-    assert r.avg_by_category["Продукты домой"] == 50000
-
-
-def test_monthly_report_skips_empty_months():
-    ops = [op(date(2026, 8, 5), E, 1000, "Досуг"), op(date(2026, 9, 5), E, 3000, "Досуг")]
-    r = reports.monthly_report(ops, date(2026, 9, 1))
-    assert r.avg_months == [date(2026, 8, 1)]
-    assert r.avg_expense == 1000
-
-
-def test_monthly_report_no_history():
-    r = reports.monthly_report([op(date(2026, 9, 5), E, 3000, "Досуг")], date(2026, 9, 1))
-    assert r.avg_expense is None
-    assert "мало данных" in reports.format_monthly_report(r)
-
-
-def test_format_monthly_report():
-    from bot.categories import DEFAULT_CATEGORIES
-    icons = {(c.type, c.name): c.emoji for c in DEFAULT_CATEGORIES}
-    text = reports.format_monthly_report(reports.monthly_report(_history(), date(2026, 9, 1)), icons=icons)
-    assert "Сентябрь 2026</b> — итоги месяца" in text
-    assert "🟢 Сальдо: <b>+30\u00a0000</b> · сбережения 25%" in text
-    assert "💸 Расход: <b>90\u00a0000</b>  ⬆️ +80%" in text        # 90к против среднего 50к
-    assert "💰 Доход: <b>120\u00a0000</b>  ⬆️ +20%" in text
-    assert "🛒 Продукты домой — 60\u00a0000 · 67%  ⬆️ +20%" in text  # все категории, с эмодзи
-    assert "🎭 Досуг — 30\u00a0000 · 33%  🆕" in text
-    assert "💼 Зарплата — 120\u00a0000 · 100%  ⬆️ +20%" in text      # доходы по категориям
-    assert "#командировка" in text
-    assert text.splitlines()[-1].startswith("💬 Месяц в плюсе на 30\u00a0000")
-    assert "сильнее всего отклонились: 🎭 Досуг 🆕, 🛒 Продукты домой ⬆️ +20%." in text
-
-
-def test_all_nonzero_categories_shown():
-    ops = [op(date(2026, 9, i + 1), E, 100 + i, f"Кат{i}") for i in range(8)]
-    text = reports.format_monthly_report(reports.monthly_report(ops, date(2026, 9, 1)))
-    assert all(f"Кат{i}" in text for i in range(8))
-    lines = [l for l in text.splitlines() if l.startswith("Кат")]
-    assert lines[0].startswith("Кат7")                          # по убыванию
-
-
-@pytest.mark.parametrize("current,avg,expected", [
-    (Decimal(112), Decimal(100), "⬆️ +12%"),
-    (Decimal(80), Decimal(100), "⬇️ −20%"),
-    (Decimal(101), Decimal(100), "≈ среднее"),
-    (Decimal(11500), Decimal(100), "⬆️ +11\u00a0400 (×115)"),
-    (Decimal(320), Decimal(100), "⬆️ +220 (×3,2)"),
-    (Decimal(50), None, "🆕"),
-    (Decimal(50), Decimal(0), "🆕"),
-])
-def test_compare_to_average(current, avg, expected):
-    assert reports.compare_to_average(current, avg) == expected
-
-
-def test_red_balance_and_conclusion():
-    ops = [op(date(2026, 8, 1), I, 100, "Зарплата"), op(date(2026, 8, 2), E, 100, "Досуг"),
-           op(date(2026, 9, 1), I, 100, "Зарплата"), op(date(2026, 9, 2), E, 250, "Досуг")]
-    text = reports.format_monthly_report(reports.monthly_report(ops, date(2026, 9, 1)))
-    assert "🔴 Сальдо: <b>−150</b>" in text
-    assert "💬 Расходы превысили доходы на 150; траты выше среднего на 150%" in text
-
-
-def test_import_tag_hidden():
-    ops = [op(date(2026, 9, 30), E, 100, "Досуг", ["импорт"]), op(date(2026, 9, 3), E, 5, "Досуг", ["командировка"])]
-    text = reports.format_monthly_report(reports.monthly_report(ops, date(2026, 9, 1)))
-    assert "#импорт" not in text and "#командировка" in text
-    s = reports.summarize_month(ops, date(2026, 9, 1))
-    assert "#импорт" not in reports.format_month(s, date(2026, 9, 30))
-
-
-def test_format_category_report():
-    ops = _history() + [op(date(2026, 10, 2), E, 700, "Продукты домой")]
-    text = reports.format_category_report("Продукты домой", ops, date(2026, 10, 4))
-    assert "700" in text
-    assert f"сен 2026: 60{NB}000" in text
 
 
 def test_shift_months():
@@ -203,7 +112,7 @@ def test_capital_summary_example():
 def test_format_capital_example():
     entries, ops = _example()
     text = reports.format_capital(reports.capital_summary(entries, ops, ["Карта", "Вклад"]))
-    assert f"всего <b>12{NB}400</b> (+650 к сентябрю)" in text
+    assert f"Капитал на 1 октября</b>: <b>12{NB}400</b> (+650 к 1 сентября)" in text
     assert f"• Карта: 3{NB}100 (−200)" in text
     assert f"• Вклад: 9{NB}300 (+850)" in text
     assert "Доход − траты за сентябрь: +500" in text
@@ -236,10 +145,6 @@ def test_capital_new_account_and_no_operations():
 def test_capital_same_month_reference():
     entries = _snap(date(2026, 10, 1), card=100) + _snap(date(2026, 10, 15), card=130)
     text = reports.format_capital(reports.capital_summary(entries, []))
-    assert "(+30 к 01.10)" in text
+    assert "(+30 к 1 октября)" in text
 
 
-def test_conclusion_uses_multiplier_for_huge_growth():
-    ops = [op(date(2026, 8, 1), E, 100, "Досуг"), op(date(2026, 9, 1), E, 520, "Досуг")]
-    text = reports.format_monthly_report(reports.monthly_report(ops, date(2026, 9, 1)))
-    assert "траты в 5,2 раза выше среднего" in text and "420%" not in text
