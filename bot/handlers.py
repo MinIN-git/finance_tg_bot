@@ -85,6 +85,11 @@ class StatsView(CallbackData, prefix="sv"):
     view: str   # main | heavy
 
 
+class TripMark(CallbackData, prefix="tm"):
+    op_id: str
+    on: bool
+
+
 class Snap(CallbackData, prefix="snap"):
     pos: int  # номер вопроса; -1 — прервать опрос
 
@@ -194,12 +199,23 @@ def pick_type_view(svc: FinanceService, pid: str, op: Operation, choices: dict[O
     return text, kb.as_markup()
 
 
-def saved_keyboard(op: Operation) -> InlineKeyboardMarkup:
+def saved_keyboard(op: Operation, trip=None, in_trip: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="↩️ Отменить", callback_data=DelOp(op_id=op.id))
     if op.type != OpType.TRANSFER:
         kb.button(text="🏷 Категория", callback_data=ChangeCat(op_id=op.id, idx=-1))
+    if trip is not None:
+        if in_trip:
+            kb.button(text="✖️ Не командировка", callback_data=TripMark(op_id=op.id, on=False))
+        else:
+            kb.button(text=f"✈️ В {trip.city}"[:40], callback_data=TripMark(op_id=op.id, on=True))
+    kb.adjust(2)
     return kb.as_markup()
+
+
+async def saved_kb(svc: FinanceService, op: Operation) -> InlineKeyboardMarkup:
+    trip, in_trip = await svc.trip_for_button(op)
+    return saved_keyboard(op, trip, in_trip)
 
 
 async def last_view(svc: FinanceService) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -285,6 +301,29 @@ async def cmd_signals(message: Message, command: CommandObject, svc: FinanceServ
         if current:
             text += "\n\nСейчас:\n" + "\n".join(f"• {t}" for _, t in current)
     await message.answer(text)
+
+
+@router.message(Command("trip", "поездка"))
+async def cmd_trip(message: Message, command: CommandObject, svc: FinanceService) -> None:
+    await message.answer(await svc.trip_command(command.args))
+
+
+@router.message(Command("trips", "командировки", "поездки"))
+async def cmd_trips(message: Message, svc: FinanceService) -> None:
+    await message.answer(await svc.trips_text())
+
+
+@router.callback_query(TripMark.filter())
+async def on_trip_mark(call: CallbackQuery, callback_data: TripMark, svc: FinanceService) -> None:
+    op = await svc.toggle_trip(callback_data.op_id, callback_data.on)
+    if op is None:
+        await call.answer("Не получилось: операция или поездка не найдена", show_alert=True)
+        return
+    try:
+        await call.message.edit_text(f"✅ {svc.describe(op)}", reply_markup=await saved_kb(svc, op))
+    except TelegramBadRequest:
+        pass
+    await call.answer("Помечено как командировка" if callback_data.on else "Пометка снята")
 
 
 @router.message(Command("categories"))
@@ -426,7 +465,7 @@ async def on_text(message: Message, svc: FinanceService) -> None:
         return
 
     await svc.save(op)
-    await message.answer(f"✅ {svc.describe(op)}", reply_markup=saved_keyboard(op))
+    await message.answer(f"✅ {svc.describe(op)}", reply_markup=await saved_kb(svc, op))
 
 
 STALE = "Эта операция устарела (бот перезапускался) — отправьте ее заново"
@@ -443,7 +482,7 @@ async def on_pick_type(call: CallbackQuery, callback_data: PickType, svc: Financ
     op.category = choices[op.type]
     await svc.save(op)
     svc.pop_pending(callback_data.pid)
-    await call.message.edit_text(f"✅ {svc.describe(op)}", reply_markup=saved_keyboard(op))
+    await call.message.edit_text(f"✅ {svc.describe(op)}", reply_markup=await saved_kb(svc, op))
     await call.answer()
 
 
@@ -475,7 +514,7 @@ async def on_pick_category(call: CallbackQuery, callback_data: PickCat, svc: Fin
     text = f"✅ {svc.describe(op)}"
     if learned:
         text += f"\n🧠 Запомнил: «{html.escape(learned)}» → {html.escape(op.category)}"
-    await call.message.edit_text(text, reply_markup=saved_keyboard(op))
+    await call.message.edit_text(text, reply_markup=await saved_kb(svc, op))
     await call.answer()
 
 
@@ -502,7 +541,7 @@ async def on_change_category(call: CallbackQuery, callback_data: ChangeCat, svc:
     text = f"✅ {svc.describe(updated)}"
     if learned:
         text += f"\n🧠 Запомнил: «{html.escape(learned)}» → {html.escape(updated.category)}"
-    await call.message.edit_text(text, reply_markup=saved_keyboard(updated))
+    await call.message.edit_text(text, reply_markup=await saved_kb(svc, updated))
     await call.answer("Категория изменена")
 
 

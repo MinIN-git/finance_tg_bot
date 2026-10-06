@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
@@ -65,6 +66,38 @@ HEAVY_TAG_ALIASES = {"тяжелое", "тяжелая", "крупное", "кр
 
 def is_heavy(op: "Operation") -> bool:
     return op.type == OpType.EXPENSE and HEAVY_TAG in op.tags
+
+
+TRIP_TAG_PREFIX = "поездка-"
+
+
+@dataclass
+class Trip:
+    """Командировка из листа «Поездки». Траты помечаются тегом #поездка-<id>."""
+    city: str
+    start: date
+    end: date
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            slug = re.sub(r"[^\w]+", "_", self.city.lower().replace("ё", "е")).strip("_")
+            self.id = f"{slug}-{self.start:%d%m%y}"
+
+    @property
+    def tag(self) -> str:
+        return f"{TRIP_TAG_PREFIX}{self.id}"
+
+    @property
+    def days(self) -> int:
+        return (self.end - self.start).days + 1
+
+    def covers(self, d: date) -> bool:
+        return self.start <= d <= self.end
+
+
+def trip_tag(op: "Operation") -> str | None:
+    return next((t for t in op.tags if t.startswith(TRIP_TAG_PREFIX)), None)
 
 
 @dataclass

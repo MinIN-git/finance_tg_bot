@@ -124,7 +124,7 @@ def run(coro):
 
 def test_ensure_sheets_creates_and_seeds(storage):
     sheets = storage._sh.sheets
-    assert set(sheets) == {"Лист1", "Операции", "Счета", "Категории", "Остатки", "Большие покупки"}
+    assert set(sheets) == {"Лист1", "Операции", "Счета", "Категории", "Остатки", "Большие покупки", "Поездки"}
     assert sheets["Операции"].rows[0][-1] == "id"
     accounts = run(storage.list_accounts())
     assert [(a.name, a.prompt) for a in accounts][0] == ("Карта", "Сколько на карте?")

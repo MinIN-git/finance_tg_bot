@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .categories import DEFAULT_CATEGORIES
-from .models import Account, BalanceEntry, BigPurchase, Category, Operation, OpType
+from .models import Account, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ SHEET_ACCOUNTS = "Счета"
 SHEET_CATEGORIES = "Категории"
 SHEET_BALANCES = "Остатки"
 SHEET_BIG = "Большие покупки"
+SHEET_TRIPS = "Поездки"
 
 HEADERS = {
     SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id"],
@@ -35,6 +36,7 @@ HEADERS = {
     SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
     SHEET_BIG: ["Дата", "Что купил", "Стоимость", "Категория", "id"],
+    SHEET_TRIPS: ["Город", "Начало", "Конец", "id"],
 }
 
 
@@ -90,6 +92,15 @@ class Storage(ABC):
     async def add_big_purchase(self, item: BigPurchase) -> None:
         """Дописать строку в «Большие покупки»."""
 
+    async def list_trips(self) -> list[Trip]:
+        return []
+
+    async def add_trip(self, trip: Trip) -> None:
+        raise NotImplementedError
+
+    async def delete_trip(self, trip_id: str) -> None:
+        raise NotImplementedError
+
     async def delete_big_purchase(self, op_id: str) -> None:
         """Убрать строку, которую бот дописал для операции op_id."""
 
@@ -108,12 +119,14 @@ class MemoryStorage(Storage):
         accounts: list[Account] | None = None,
         balances: list[BalanceEntry] | None = None,
         big_purchases: list[BigPurchase] | None = None,
+        trips: list[Trip] | None = None,
     ) -> None:
         self.operations = list(operations or [])
         self.categories = copy.deepcopy(categories if categories is not None else DEFAULT_CATEGORIES)
         self.accounts = copy.deepcopy(accounts if accounts is not None else DEFAULT_ACCOUNTS)
         self.balances = list(balances or [])
         self.big_purchases = list(big_purchases or [])
+        self.trips = list(trips or [])
 
     async def list_operations(self) -> list[Operation]:
         return list(self.operations)
@@ -158,6 +171,15 @@ class MemoryStorage(Storage):
 
     async def add_big_purchase(self, item: BigPurchase) -> None:
         self.big_purchases.append(item)
+
+    async def list_trips(self) -> list[Trip]:
+        return list(self.trips)
+
+    async def add_trip(self, trip: Trip) -> None:
+        self.trips.append(trip)
+
+    async def delete_trip(self, trip_id: str) -> None:
+        self.trips = [t for t in self.trips if t.id != trip_id]
 
     async def delete_big_purchase(self, op_id: str) -> None:
         self.big_purchases = [b for b in self.big_purchases if not (op_id and b.op_id == op_id)]
@@ -340,6 +362,7 @@ class SheetsStorage(Storage):
         self._ops_loaded_at = 0.0
         self._cats: list[Category] | None = None
         self._accounts: list[Account] | None = None
+        self._trips: list[Trip] | None = None
 
     # ----- инициализация -----
 
@@ -642,8 +665,42 @@ class SheetsStorage(Storage):
                     f"{_col_letter(lay.cat_col)}{row}", value_input_option="USER_ENTERED",
                 )
 
+    # ----- поездки -----
+
+    async def list_trips(self) -> list[Trip]:
+        if self._trips is None:
+            rows = await self._run(self._read, SHEET_TRIPS)
+            trips = []
+            for r in rows:
+                r = list(r) + ["", "", "", ""]
+                city, start, end = str(r[0]).strip(), cell_to_date(r[1]), cell_to_date(r[2])
+                if city and start and end:
+                    trips.append(Trip(city, start, end, str(r[3]).strip()))
+            self._trips = trips
+        return list(self._trips)
+
+    async def add_trip(self, trip: Trip) -> None:
+        async with self._lock:
+            await self._run(
+                self._ws(SHEET_TRIPS).append_row,
+                [text_for_sheet(trip.city), trip.start.isoformat(), trip.end.isoformat(), text_for_sheet(trip.id)],
+                value_input_option="USER_ENTERED", table_range="A1",
+            )
+            self._trips = None
+
+    async def delete_trip(self, trip_id: str) -> None:
+        async with self._lock:
+            ws = self._ws(SHEET_TRIPS)
+            ids = await self._run(ws.col_values, 4)
+            for idx in range(len(ids) - 1, 0, -1):
+                if ids[idx] == trip_id:
+                    await self._run(ws.delete_rows, idx + 1)
+                    break
+            self._trips = None
+
     async def refresh(self) -> None:
         async with self._lock:
+            self._trips = None
             self._ops = None
             self._cats = None
             self._accounts = None

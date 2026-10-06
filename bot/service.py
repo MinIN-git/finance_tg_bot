@@ -14,7 +14,11 @@ from zoneinfo import ZoneInfo
 
 from . import reports
 from .categories import find_category, guess_category, learnable_keyword
-from .models import HEAVY_TAG, HEAVY_TAG_ALIASES, Account, BalanceEntry, BigPurchase, Category, Operation, OpType, is_heavy
+from .models import (
+    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_TAG_PREFIX, Account, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip, is_heavy,
+    trip_tag,
+)
+from . import trips as trips_mod
 from .parser import parse_message
 from .state import State
 from .storage import Storage
@@ -76,6 +80,7 @@ class FinanceService:
         self._snapshots: dict[int, SnapshotSession] = {}
         self._finished_purpose: dict[int, str] = {}
         self._icons: dict[tuple[OpType, str], str] = {}
+        self._trip_names: dict[str, str] = {}   # тег поездки -> город, для describe()
 
     async def _categories(self) -> list[Category]:
         """Категории из хранилища; заодно обновляет кэш эмодзи для describe()."""
@@ -107,6 +112,9 @@ class FinanceService:
         )
         if op.type == OpType.TRANSFER:
             return Prepared(op, needs_category=False)
+        trip = trips_mod.covering(await self._trips(), op.date)
+        if trip is not None and op.type == OpType.EXPENSE and trip.tag not in op.tags:
+            op.tags.append(trip.tag)          # трата в даты поездки — сразу командировочная
         categories = await self._categories()
         if parsed.explicit_sign:
             op.category = guess_category(op.comment, op.type, categories) or ""
@@ -216,6 +224,9 @@ class FinanceService:
             parts.append(f"@{html.escape(op.account)}")
         if is_heavy(op):
             parts.append("🧾 тяжелая трата")
+        if trip_tag(op):
+            city = self._trip_names.get(trip_tag(op))
+            parts.append(f"✈️ {html.escape(city)}" if city else "✈️ командировка")
         tags = [t for t in op.tags if t not in reports.HIDDEN_TAGS]
         if tags:
             parts.append(" ".join(f"#{html.escape(t)}" for t in tags))
@@ -352,6 +363,78 @@ class FinanceService:
             lines.append("")
         lines.append("Ключевые слова редактируются на листе «Категории», затем /refresh.")
         return "\n".join(lines)
+
+    # ---------- командировки ----------
+
+    async def _trips(self) -> list[Trip]:
+        trips = await self.storage.list_trips()
+        self._trip_names = {t.tag: t.city for t in trips}
+        return trips
+
+    async def trip_for_button(self, op: Operation) -> tuple[Trip | None, bool]:
+        """Поездка для кнопки под записанной тратой: (поездка, уже помечена)."""
+        if op.type != OpType.EXPENSE:
+            return None, False
+        trips = await self._trips()
+        tag = trip_tag(op)
+        if tag:
+            return next((t for t in trips if t.tag == tag), None), True
+        return trips_mod.nearest_active(trips, self.today()), False
+
+    async def toggle_trip(self, op_id: str, on: bool) -> Operation | None:
+        """Пометить трату ближайшей поездкой (on) или снять пометку поездки."""
+        current = await self.get_operation(op_id)
+        if current is None:
+            return None
+        tags = [t for t in current.tags if not t.startswith(TRIP_TAG_PREFIX)]
+        if on:
+            trip = trips_mod.nearest_active(await self._trips(), self.today())
+            if trip is None:
+                return None
+            tags.append(trip.tag)
+        op = replace(current, tags=tags)
+        return op if await self.storage.update_operation(op) else None
+
+    async def trip_command(self, args: str | None) -> str:
+        today = self.today()
+        trips = await self._trips()
+        ops = await self.storage.list_operations()
+        arg = (args or "").strip()
+        if not arg:
+            return trips_mod.format_trip_status(trips_mod.nearest_active(trips, today), ops, today, self.cur)
+        if arg.lower() in ("cancel", "отмена", "end", "стоп"):
+            trip = trips_mod.nearest_active(trips, today)
+            if trip is None:
+                return "Отменять нечего — впереди поездок нет."
+            if arg.lower() in ("end", "стоп"):
+                return (f"Поездка в {html.escape(trip.city)} закончится сама {trip.end:%d.%m}. "
+                        "Чтобы удалить ее совсем: /trip cancel")
+            for op in trips_mod.trip_ops(trip, ops):
+                await self.storage.update_operation(replace(op, tags=[t for t in op.tags if t != trip.tag]))
+            await self.storage.delete_trip(trip.id)
+            return f"✖️ Поездка {html.escape(trip.city)} {trips_mod.fmt_range(trip)} отменена, пометки с трат сняты."
+        try:
+            city, start, end = trips_mod.parse_trip_args(arg, today)
+        except trips_mod.TripError as e:
+            return str(e)
+        trip = Trip(city, start, end)
+        if any(t.id == trip.id for t in trips):
+            return f"Такая поездка уже есть: {html.escape(city)} {trips_mod.fmt_range(trip)}"
+        await self.storage.add_trip(trip)
+        tagged = 0
+        for op in ops:
+            if op.type == OpType.EXPENSE and trip.covers(op.date) and not trip_tag(op):
+                await self.storage.update_operation(replace(op, tags=[*op.tags, trip.tag]))
+                tagged += 1
+        await self._trips()
+        text = f"✈️ Поездка: <b>{html.escape(city)}</b>, {trips_mod.fmt_range(trip)} · {trip.days} дн."
+        if tagged:
+            text += f"\nУже записанные траты в эти даты помечены: {tagged}."
+        text += f"\nБилеты и прочее, купленное заранее, отмечайте кнопкой «✈️ В {html.escape(city)}» под тратой."
+        return text
+
+    async def trips_text(self) -> str:
+        return trips_mod.format_trips(await self._trips(), await self.storage.list_operations(), self.today(), self.cur)
 
     # ---------- ежемесячный снимок остатков ----------
 
