@@ -97,7 +97,7 @@ def test_format_monthly_report():
     icons = {(c.type, c.name): c.emoji for c in DEFAULT_CATEGORIES}
     text = reports.format_monthly_report(reports.monthly_report(_history(), date(2026, 9, 1)), icons=icons)
     assert "Сентябрь 2026</b> — итоги месяца" in text
-    assert "🟢 Остаток: <b>+30\u00a0000</b> · сбережения 25%" in text
+    assert "🟢 Сальдо: <b>+30\u00a0000</b> · сбережения 25%" in text
     assert "💸 Расход: <b>90\u00a0000</b>  ⬆️ +80%" in text        # 90к против среднего 50к
     assert "💰 Доход: <b>120\u00a0000</b>  ⬆️ +20%" in text
     assert "🛒 Продукты домой — 60\u00a0000 · 67%  ⬆️ +20%" in text  # все категории, с эмодзи
@@ -105,7 +105,7 @@ def test_format_monthly_report():
     assert "💼 Зарплата — 120\u00a0000 · 100%  ⬆️ +20%" in text      # доходы по категориям
     assert "#командировка" in text
     assert text.splitlines()[-1].startswith("💬 Месяц в плюсе на 30\u00a0000")
-    assert "сильнее всего выросли 🎭 Досуг (+30\u00a0000)" in text
+    assert "сильнее всего отклонились: 🎭 Досуг 🆕, 🛒 Продукты домой ⬆️ +20%." in text
 
 
 def test_all_nonzero_categories_shown():
@@ -133,7 +133,7 @@ def test_red_balance_and_conclusion():
     ops = [op(date(2026, 8, 1), I, 100, "Зарплата"), op(date(2026, 8, 2), E, 100, "Досуг"),
            op(date(2026, 9, 1), I, 100, "Зарплата"), op(date(2026, 9, 2), E, 250, "Досуг")]
     text = reports.format_monthly_report(reports.monthly_report(ops, date(2026, 9, 1)))
-    assert "🔴 Остаток: <b>−150</b>" in text
+    assert "🔴 Сальдо: <b>−150</b>" in text
     assert "💬 Расходы превысили доходы на 150; траты выше среднего на 150%" in text
 
 

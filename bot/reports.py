@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterable, Mapping, Sequence
 
-from .models import BalanceEntry, Operation, OpType
+from .models import BalanceEntry, BigPurchase, Operation, OpType
 from .textutil import (
     MONTHS_DATIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_money, fmt_percent, fmt_short_date, month_title,
 )
@@ -184,7 +184,7 @@ def compare_to_average(current: Decimal, avg: Decimal | None, cur: str = "") -> 
 
 def _balance_line(s: Summary, cur: str) -> str:
     mark = "🟢" if s.balance >= 0 else "🔴"
-    line = f"{mark} Остаток: <b>{fmt_money(s.balance, cur, signed=True)}</b>"
+    line = f"{mark} Сальдо: <b>{fmt_money(s.balance, cur, signed=True)}</b>"
     if s.savings_rate is not None:
         line += f" · сбережения {fmt_percent(s.savings_rate)}"
     return line
@@ -271,6 +271,26 @@ def format_week(s: Summary, cur: str = "", icons: Icons | None = None) -> str:
     return format_period(title, s, cur, icons)
 
 
+DEVIATION_MIN_PCT = 20
+
+
+def top_deviations(r: MonthlyReport, limit: int = 3) -> list[tuple[str, Decimal, Decimal | None]]:
+    """Категории расходов, сильнее всего отклонившиеся от среднего (в деньгах), |откл.| ≥ 20%.
+    Возвращает (категория, сумма за месяц, среднее)."""
+    if not r.avg_months:
+        return []
+    current = dict(r.summary.expense_by_category)
+    out = []
+    for name in set(current) | set(r.avg_by_category):
+        amount, avg = current.get(name, ZERO), r.avg_by_category.get(name)
+        base = avg or ZERO
+        if base > 0 and abs(amount - base) / base * 100 < DEVIATION_MIN_PCT:
+            continue
+        out.append((abs(amount - base), name, amount, avg))
+    out.sort(key=lambda x: (-x[0], x[1]))
+    return [(name, amount, avg) for _, name, amount, avg in out[:limit] if _ > 0]
+
+
 def report_conclusion(r: MonthlyReport, cur: str = "", icons: Icons | None = None) -> str:
     """Короткий вывод в одну строку."""
     s = r.summary
@@ -287,17 +307,13 @@ def report_conclusion(r: MonthlyReport, cur: str = "", icons: Icons | None = Non
             parts.append(f"траты в {mult} раза выше среднего")
         elif abs(pct) >= NEAR_AVERAGE_PCT:
             parts.append(f"траты {'выше' if pct > 0 else 'ниже'} среднего на {abs(pct)}%")
-        growth = [
-            (amount - r.avg_by_category.get(name, ZERO), name)
-            for name, amount in s.expense_by_category
-        ]
-        if growth:
-            diff, name = max(growth)
-            if diff > 0 and pct > 0:
-                parts.append(
-                    f"сильнее всего выросли {_icon(icons, OpType.EXPENSE, name)}{html.escape(name)} "
-                    f"({fmt_money(diff, cur, signed=True)})"
-                )
+        devs = top_deviations(r)
+        if devs:
+            items = [
+                f"{_icon(icons, OpType.EXPENSE, name)}{html.escape(name)} {compare_to_average(amount, avg, cur)}"
+                for name, amount, avg in devs
+            ]
+            parts.append("сильнее всего отклонились: " + ", ".join(items))
     text = "; ".join(parts)
     return f"💬 {text[0].upper()}{text[1:]}."
 
@@ -451,4 +467,129 @@ def format_capital(s: CapitalSummary | None, cur: str = "") -> str:
         lines.append("Динамика: " + " · ".join(f"за {n} мес {m(v, True)}" for n, v in s.dynamics))
     elif s.prev_date is None:
         lines.append("Это первый снимок — сравнение появится со следующего.")
+    return "\n".join(lines)
+
+
+# ---------- итоги месяца (отчет 1 числа) ----------
+
+SNAPSHOT_GRACE_DAYS = 6       # снимок остатков до 6-го числа следующего месяца относится к закрытию месяца
+RECONCILE_WARN_SHARE = Decimal("0.10")
+
+
+def big_total(bigs: Iterable[BigPurchase], start: date, end: date) -> Decimal:
+    return sum((b.amount for b in bigs if start <= b.date <= end), ZERO)
+
+
+@dataclass
+class MonthClose:
+    report: MonthlyReport
+    big: list[BigPurchase]
+    capital: CapitalSummary | None
+    rolling: Summary
+    rolling_big: Decimal
+
+    @property
+    def big_total(self) -> Decimal:
+        return sum((b.amount for b in self.big), ZERO)
+
+    @property
+    def expense_wo_big(self) -> Decimal:
+        return max(self.report.summary.expense - self.big_total, ZERO)
+
+    @property
+    def balance_wo_big(self) -> Decimal:
+        return self.report.summary.income - self.expense_wo_big
+
+    @property
+    def reconcile_diff(self) -> Decimal | None:
+        """Прирост капитала − сальдо месяца (то, что операции не объясняют)."""
+        c = self.capital
+        if c is None or c.total_delta is None:
+            return None
+        return c.total_delta - self.report.summary.balance
+
+    @property
+    def reconcile_warning(self) -> bool:
+        diff, income = self.reconcile_diff, self.report.summary.income
+        return diff is not None and income > 0 and abs(diff) > income * RECONCILE_WARN_SHARE
+
+
+def month_close(
+    ops: Sequence[Operation],
+    bigs: Sequence[BigPurchase],
+    balances: Sequence[BalanceEntry],
+    month: date,
+    account_order: Sequence[str] = (),
+) -> MonthClose:
+    first, last = month_start(month), month_end(month)
+    report = monthly_report(ops, first)
+    cutoff = last + timedelta(days=SNAPSHOT_GRACE_DAYS)
+    capital = capital_summary([b for b in balances if b.date <= cutoff], ops, account_order)
+    if capital is not None and capital.date < last - timedelta(days=SNAPSHOT_GRACE_DAYS):
+        capital = None   # свежего снимка на конец месяца нет
+    rolling_start = add_months(first, -2)
+    return MonthClose(
+        report=report,
+        big=sorted((b for b in bigs if first <= b.date <= last), key=lambda b: b.date),
+        capital=capital,
+        rolling=summarize(ops, rolling_start, last),
+        rolling_big=big_total(bigs, rolling_start, last),
+    )
+
+
+def format_capital_block(c: CapitalSummary, cur: str = "") -> list[str]:
+    """Капитал в отчете месяца: итог, счета, изменение (без строки «доход − траты» — она выше)."""
+    m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
+    head = f"💼 <b>Капитал на {fmt_short_date(c.date)}</b>: <b>{m(c.total)}</b>"
+    if c.total_delta is not None:
+        head += f" ({m(c.total_delta, True)} к {fmt_short_date(c.prev_date)})"
+    lines = [head]
+    for a in c.accounts:
+        delta = f" ({m(a.delta, True)})" if a.delta is not None else ""
+        lines.append(f"• {html.escape(a.account)}: {m(a.amount)}{delta}")
+    return lines
+
+
+def format_month_close(mc: MonthClose, cur: str = "", icons: Icons | None = None) -> str:
+    r, s = mc.report, mc.report.summary
+    m = lambda v, signed=False: fmt_money(v, cur, signed=signed)  # noqa: E731
+    lines = [f"📊 <b>{month_title(s.start).capitalize()}</b> — итоги месяца", "", *format_totals(s, cur, r)]
+    if s.count == 0:
+        lines += ["", "За этот месяц операций нет."]
+    if mc.big:
+        share = f" · {fmt_percent(mc.big_total / s.income * 100)} дохода" if s.income > 0 else ""
+        lines += ["", f"🧾 Разовые траты: <b>{m(mc.big_total)}</b>{share}"]
+        lines += [f"• {fmt_short_date(b.date)} {html.escape(b.what) or 'покупка'} — {m(b.amount)}" for b in mc.big]
+        rate = f" · сбережения {fmt_percent(mc.balance_wo_big / s.income * 100)}" if s.income > 0 else ""
+        lines.append(f"Без разовых: расход {m(mc.expense_wo_big)} · сальдо {m(mc.balance_wo_big, True)}{rate}")
+    if r.avg_months:
+        months = ", ".join(MONTHS_SHORT[x.month - 1] for x in r.avg_months)
+        lines.append(f"<i>Сравнение — со средним за {len(r.avg_months)} мес. ({months})</i>")
+
+    lines.append("")
+    if mc.capital is None:
+        lines.append("💼 Снимок остатков на конец месяца не заполнен — /snapshot")
+    else:
+        lines += format_capital_block(mc.capital, cur)
+        diff = mc.reconcile_diff
+        if diff is not None:
+            lines.append(
+                f"Сверка: прирост {m(mc.capital.total_delta, True)} − сальдо {m(s.balance, True)} "
+                f"= <b>{m(diff, True)}</b> не учтено"
+            )
+            if mc.reconcile_warning:
+                lines.append("⚠️ Расхождение больше 10% дохода — похоже, часть трат или доходов не записана.")
+
+    if s.count:
+        lines += _sections(s, cur, icons, r)
+    roll = mc.rolling
+    if roll.count:
+        months = f"{MONTHS_SHORT[roll.start.month - 1]}–{MONTHS_SHORT[roll.end.month - 1]}"
+        rate = f" · сбережения {fmt_percent(roll.savings_rate)}" if roll.savings_rate is not None else ""
+        lines += ["", f"📆 <b>3 месяца ({months})</b>: доход {m(roll.income)}, расход {m(roll.expense)}, "
+                      f"сальдо {m(roll.balance, True)}{rate}"]
+    if not r.avg_months and s.count:
+        lines += ["", "Для сравнения со средним пока мало данных."]
+    if s.count:
+        lines += ["", report_conclusion(r, cur, icons)]
     return "\n".join(lines)

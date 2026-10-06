@@ -13,6 +13,7 @@ from .config import Config, ConfigError
 from .handlers import WhitelistMiddleware, router
 from .scheduler import setup_scheduler
 from .service import FinanceService
+from .state import State
 from .storage import MemoryStorage, SheetsStorage, Storage
 
 COMMANDS = [
@@ -47,7 +48,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = Config.from_env()
     storage = await asyncio.to_thread(build_storage, config)
-    svc = FinanceService(storage, tz=config.tz, currency=config.currency)
+    svc = FinanceService(storage, tz=config.tz, currency=config.currency, state=State(config.state_file))
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(svc=svc)

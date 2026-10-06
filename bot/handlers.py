@@ -244,6 +244,9 @@ async def send_snapshot_step(message: Message, svc: FinanceService, nxt: Snapsho
     if nxt is not None:
         text, kb = snapshot_question_view(nxt, svc.cur)
         await message.answer(text, reply_markup=kb)
+    elif svc.pop_finished_purpose(message.chat.id) == "monthly":
+        await message.answer(await svc.month_close_text())
+        svc.state.mark_month_closed(svc.today().strftime("%Y-%m"))
     else:
         await message.answer(await svc.capital_text())
 

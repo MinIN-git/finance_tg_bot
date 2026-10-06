@@ -14,6 +14,7 @@ from . import reports
 from .categories import find_category, guess_category, learnable_keyword
 from .models import Account, BalanceEntry, Category, Operation, OpType
 from .parser import parse_message
+from .state import State
 from .storage import Storage
 from .textutil import fmt_money, fmt_short_date, normalize
 
@@ -43,6 +44,7 @@ class SnapshotSession:
     accounts: list[Account]
     previous: dict[str, BalanceEntry]
     position: int = 0
+    purpose: str = "manual"           # "monthly" — опрос 1 числа, после него приходят итоги месяца
 
     def question(self) -> SnapshotQuestion | None:
         if self.position >= len(self.accounts):
@@ -58,14 +60,17 @@ class FinanceService:
         tz: ZoneInfo | None = None,
         currency: str = "",
         today_fn: Callable[[], date] | None = None,
+        state: State | None = None,
     ) -> None:
         self.storage = storage
+        self.state = state or State()
         self.tz = tz or ZoneInfo("Europe/Moscow")
         self.cur = currency
         self._today_fn = today_fn
         self._pending: OrderedDict[str, Operation] = OrderedDict()
         self._pending_choices: dict[str, dict[OpType, str]] = {}
         self._snapshots: dict[int, SnapshotSession] = {}
+        self._finished_purpose: dict[int, str] = {}
         self._icons: dict[tuple[OpType, str], str] = {}
 
     async def _categories(self) -> list[Category]:
@@ -231,11 +236,18 @@ class FinanceService:
         icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
         return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
 
-    async def monthly_report_text(self, month: date | None = None) -> str:
-        month = month or reports.add_months(self.today(), -1)
+    async def month_close_text(self, month: date | None = None) -> str:
+        """Итоги месяца (по умолчанию — прошлого): операции, разовые траты, капитал и сверка."""
+        month = reports.month_start(month or reports.add_months(self.today(), -1))
         ops = await self.storage.list_operations()
+        accounts = [a.name for a in await self.storage.list_accounts()]
+        mc = reports.month_close(
+            ops, await self.storage.list_big_purchases(), await self.storage.list_balances(), month, accounts,
+        )
         await self._categories()
-        return reports.format_monthly_report(reports.monthly_report(ops, month), self.cur, self._icons)
+        return reports.format_month_close(mc, self.cur, self._icons)
+
+    monthly_report_text = month_close_text
 
     async def categories_text(self) -> str:
         cats = await self._categories()
@@ -252,7 +264,7 @@ class FinanceService:
 
     # ---------- ежемесячный снимок остатков ----------
 
-    async def start_snapshot(self, user_id: int) -> SnapshotQuestion | None:
+    async def start_snapshot(self, user_id: int, purpose: str = "manual") -> SnapshotQuestion | None:
         """Начинает опрос «сколько на каждом счете». None — в листе «Счета» нет счетов."""
         accounts = await self.storage.list_accounts()
         if not accounts:
@@ -262,7 +274,7 @@ class FinanceService:
         for e in sorted(await self.storage.list_balances(), key=lambda e: e.date):
             if e.date < today:
                 previous[e.account] = e
-        session = SnapshotSession(today, accounts, previous)
+        session = SnapshotSession(today, accounts, previous, purpose=purpose)
         self._snapshots[user_id] = session
         return session.question()
 
@@ -291,7 +303,12 @@ class FinanceService:
         nxt = session.question()
         if nxt is None:
             self._snapshots.pop(user_id, None)
+            self._finished_purpose[user_id] = session.purpose
         return True, nxt
+
+    def pop_finished_purpose(self, user_id: int) -> str:
+        """Для чего был только что завершенный опрос: "monthly" или "manual"."""
+        return self._finished_purpose.pop(user_id, "manual")
 
     async def capital_text(self) -> str:
         accounts = [a.name for a in await self.storage.list_accounts()]

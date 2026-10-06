@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .categories import DEFAULT_CATEGORIES
-from .models import Account, BalanceEntry, Category, Operation, OpType
+from .models import Account, BalanceEntry, BigPurchase, Category, Operation, OpType
 
 log = logging.getLogger(__name__)
 
@@ -26,12 +26,14 @@ SHEET_OPERATIONS = "Операции"
 SHEET_ACCOUNTS = "Счета"
 SHEET_CATEGORIES = "Категории"
 SHEET_BALANCES = "Остатки"
+SHEET_BIG = "Большие покупки"
 
 HEADERS = {
     SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id"],
     SHEET_ACCOUNTS: ["Название", "Вопрос для ежемесячного снимка"],
     SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
+    SHEET_BIG: ["Дата", "Что купил", "Стоимость"],
 }
 
 
@@ -80,6 +82,10 @@ class Storage(ABC):
     async def add_balance(self, entry: BalanceEntry) -> None:
         """Добавляет остаток; запись за ту же дату и тот же счет заменяется."""
 
+    async def list_big_purchases(self) -> list[BigPurchase]:
+        """Разовые крупные траты (лист «Большие покупки»)."""
+        return []
+
     async def refresh(self) -> None:
         """Сбросить кэш (если он есть)."""
 
@@ -91,11 +97,13 @@ class MemoryStorage(Storage):
         categories: list[Category] | None = None,
         accounts: list[Account] | None = None,
         balances: list[BalanceEntry] | None = None,
+        big_purchases: list[BigPurchase] | None = None,
     ) -> None:
         self.operations = list(operations or [])
         self.categories = copy.deepcopy(categories if categories is not None else DEFAULT_CATEGORIES)
         self.accounts = copy.deepcopy(accounts if accounts is not None else DEFAULT_ACCOUNTS)
         self.balances = list(balances or [])
+        self.big_purchases = list(big_purchases or [])
 
     async def list_operations(self) -> list[Operation]:
         return list(self.operations)
@@ -134,6 +142,9 @@ class MemoryStorage(Storage):
 
     async def list_balances(self) -> list[BalanceEntry]:
         return list(self.balances)
+
+    async def list_big_purchases(self) -> list[BigPurchase]:
+        return list(self.big_purchases)
 
     async def add_balance(self, entry: BalanceEntry) -> None:
         self.balances = [
@@ -212,6 +223,49 @@ def row_to_op(row: list[Any]) -> Operation | None:
         account=str(row[4]).strip(), to_account=str(row[5]).strip(), comment=str(row[6]).strip(),
         tags=tags, id=str(row[8]).strip(),
     )
+
+
+def _month_cell(value: Any) -> date | None:
+    """«09.2026» / «сентябрь 2026» нет — только дата или «мм.гггг»."""
+    m = re.fullmatch(r"(\d{1,2})\.(\d{4})", str(value).strip())
+    if m and 1 <= int(m.group(1)) <= 12:
+        return date(int(m.group(2)), int(m.group(1)), 1)
+    return None
+
+
+def parse_big_purchases(formatted: list[list[Any]], raw: list[list[Any]]) -> list[BigPurchase]:
+    """Лист «Большие покупки»: ищет строку заголовка с «Дата» и «Стоимость» (или «Сумма»),
+    колонка описания — «Что купил»/«Покупка»/«Название»; читает строки ниже."""
+    def norm(v: Any) -> str:
+        return str(v).strip().lower().replace("ё", "е")
+
+    header = date_col = cost_col = what_col = None
+    for r, row in enumerate(formatted):
+        cells = [norm(v) for v in row]
+        d = next((i for i, v in enumerate(cells) if v.startswith("дата")), None)
+        c = next((i for i, v in enumerate(cells) if v.startswith(("стоимост", "сумма", "цена"))), None)
+        if d is not None and c is not None:
+            header, date_col, cost_col = r, d, c
+            what_col = next(
+                (i for i, v in enumerate(cells) if i not in (d, c) and v.startswith(("что", "покуп", "назван", "описан"))),
+                None,
+            )
+            break
+    if header is None:
+        return []
+    out = []
+    for r in range(header + 1, len(formatted)):
+        def cell(grid, c):
+            row = grid[r] if r < len(grid) else []
+            return row[c] if c is not None and c < len(row) else ""
+        d = cell(raw, date_col)
+        when = cell_to_date(d) if str(d).strip() else None
+        when = when or _month_cell(cell(formatted, date_col)) or cell_to_date(cell(formatted, date_col))
+        amount = cell_to_decimal(cell(raw, cost_col)) if str(cell(raw, cost_col)).strip() else None
+        if when is None or amount is None or amount <= 0:
+            continue
+        out.append(BigPurchase(when, str(cell(formatted, what_col)).strip(), amount))
+    return out
 
 
 class SheetsStorage(Storage):
@@ -459,6 +513,16 @@ class SheetsStorage(Storage):
                     await self._run(ws.update, [row], f"A{idx}:C{idx}", value_input_option="USER_ENTERED")
                     return
             await self._run(ws.append_row, row, value_input_option="USER_ENTERED", table_range="A1")
+
+    # ----- большие покупки -----
+
+    async def list_big_purchases(self) -> list[BigPurchase]:
+        try:
+            formatted, raw = await self._run(self.read_grid, SHEET_BIG)
+        except Exception:
+            log.warning("Не удалось прочитать лист «%s»", SHEET_BIG, exc_info=True)
+            return []
+        return parse_big_purchases(formatted, raw)
 
     async def refresh(self) -> None:
         async with self._lock:

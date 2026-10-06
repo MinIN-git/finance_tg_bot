@@ -20,6 +20,7 @@ class Config:
     report_hour: int
     cache_ttl: int
     currency: str
+    state_file: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -52,4 +53,5 @@ class Config:
             report_hour=int(os.getenv("REPORT_HOUR", "10")),
             cache_ttl=int(os.getenv("CACHE_TTL", "300")),
             currency=os.getenv("CURRENCY", "").strip(),
+            state_file=os.getenv("STATE_FILE", "data/state.json"),
         )

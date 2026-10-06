@@ -159,3 +159,26 @@ def test_emoji_in_saved_reply_and_last(h):
     assert "🍽 Еда вне дома" in texts(out)[0]
     out = h.text("/last")
     assert "🍽 Еда вне дома" in texts(out)[0]
+
+
+def test_monthly_snapshot_ends_with_month_close(h):
+    q = asyncio.run(h.svc.start_snapshot(1, purpose="monthly"))
+    out = []
+    for _ in range(q.total):
+        out = h.text("1000")
+    assert "итоги месяца" in texts(out)[0]
+    assert h.svc.state.month_closed("2026-10")
+    # обычный /snapshot заканчивается сводкой /capital
+    h.text("/snapshot")
+    for _ in range(q.total):
+        out = h.text("1000")
+    assert "итоги месяца" not in texts(out)[0] and "💼" in texts(out)[0]
+
+
+def test_fallback_job_sends_once(h):
+    from bot.scheduler import monthly_fallback_job
+    n = len(h.session.sent)
+    asyncio.run(monthly_fallback_job(h.bot, h.svc, frozenset({1})))
+    asyncio.run(monthly_fallback_job(h.bot, h.svc, frozenset({1})))
+    sent = [m for m in h.session.sent[n:] if "итоги месяца" in (getattr(m, "text", "") or "")]
+    assert len(sent) == 1

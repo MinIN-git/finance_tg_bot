@@ -8,6 +8,7 @@ services:
       GOOGLE_CREDENTIALS_FILE: /app/secrets/service_account.json
     volumes:
       - ./secrets:/app/secrets:ro
+      - ./data:/app/data
     logging:
       driver: json-file
       options:
