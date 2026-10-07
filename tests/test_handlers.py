@@ -166,7 +166,7 @@ def test_monthly_snapshot_ends_with_month_close(h):
     out = []
     for _ in range(q.total):
         out = h.text("1000")
-    assert "📊" in texts(out)[0] and "без тяжелых трат" in texts(out)[0]
+    assert "📊" in texts(out)[0] and "Потрачено" in texts(out)[0]
     assert h.svc.state.month_closed("2026-10")
     # обычный /snapshot заканчивается сводкой /capital
     h.text("/snapshot")
@@ -228,11 +228,11 @@ def test_report_buttons_switch_views(h):
     ]
     out = h.text("/report")
     kb = buttons(out)
-    assert set(kb) == {"🧾 Тяжелые траты", "📋 Все категории"}
-    out = h.click(kb["🧾 Тяжелые траты"])
+    assert set(kb) == {"🧾 Тяжелые"}                      # командировок нет — кнопки нет
+    out = h.click(kb["🧾 Тяжелые"])
     assert "отпуск" in texts(out)[0] and set(buttons(out)) == {"← Назад"}
     out = h.click(buttons(out)["← Назад"])
-    assert "без тяжелых трат" in texts(out)[0]
+    assert "Потрачено" in texts(out)[0]
 
 
 def test_month_buttons(h):

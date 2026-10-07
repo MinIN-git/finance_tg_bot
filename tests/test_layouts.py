@@ -1,199 +1,215 @@
-"""Тексты отчетов в итоговой раскладке."""
+"""Отчеты в итоговой раскладке: сухой /report, /stats с плитками, «обычно» = медиана за 6 месяцев."""
 import asyncio
 from datetime import date
 from decimal import Decimal
 
-
 from bot import reports
 from bot.categories import DEFAULT_CATEGORIES
 from bot.charts import stats_chart
-from bot.models import BalanceEntry, BigPurchase, Operation, OpType
+from bot.models import BalanceEntry, Operation, OpType, Trip
 from bot.service import FinanceService
 from bot.storage import MemoryStorage
 
 E, I = OpType.EXPENSE, OpType.INCOME
 NB = " "
-ICONS = {(c.type, c.name): c.emoji for c in DEFAULT_CATEGORIES}
+TRIP = Trip("Командировка", date(2026, 9, 6), date(2026, 9, 11))
 
 
 def op(d, t, amount, cat, tags=(), comment=""):
-    return Operation(date=d, type=t, amount=Decimal(amount), category=cat, tags=list(tags), comment=comment)
+    return Operation(date=d, type=t, amount=Decimal(str(amount)), category=cat, tags=list(tags), comment=comment)
 
 
-def history():
-    """Июнь–август — обычные месяцы, сентябрь — с отпуском (#тяжелое) и ростом одежды."""
-    ops = []
-    for m in (6, 7, 8):
-        ops += [op(date(2026, m, 1), I, 300000, "Зарплата"), op(date(2026, m, 5), E, 44000, "Одежда / украшения"),
-                op(date(2026, m, 6), E, 18000, "Машина"), op(date(2026, m, 7), E, 30000, "Продукты домой"),
-                op(date(2026, m, 8), E, 500, "Подписки")]
-    ops += [op(date(2026, 9, 1), I, 491386.34, "Зарплата"), op(date(2026, 9, 5), E, 82291, "Одежда / украшения"),
-            op(date(2026, 9, 6), E, 2672, "Машина"), op(date(2026, 9, 7), E, 31000, "Продукты домой"),
-            op(date(2026, 9, 12), E, 283122, "Досуг", ["тяжелое"], "отпуск турция"),
-            op(date(2026, 9, 13), E, 5000, "Досуг")]
+SEPT_REGULAR = {"Одежда / украшения": 82291, "Ипотека": 32500, "Семейные расходы": 31200, "Продукты домой": 31000,
+                "Транспорт/РЖД": 16575, "Еда вне дома": 12593, "Прочее": 11990, "ЖКУ": 10597, "Машина": 3904}
+
+
+def september():
+    ops = [op(date(2026, 9, 1), I, 491386, "Зарплата")]
+    ops += [op(date(2026, 9, 10), E, a, c) for c, a in SEPT_REGULAR.items()]
+    ops.append(op(date(2026, 9, 6), E, 283122, "Досуг", ["тяжелое"], "Отпуск в Турцию"))
+    ops += [op(date(2026, 9, 6), E, 14897, "Еда вне дома", [TRIP.tag], "Кафешки"),
+            op(date(2026, 9, 6), E, 7098, "Транспорт/РЖД", [TRIP.tag], "ЖД"),
+            op(date(2026, 9, 6), E, 20000, "Прочее", [TRIP.tag], "Жилье")]
     return ops
 
 
 BAL = [BalanceEntry(date(2026, 9, 1), "Карта", Decimal(790000)), BalanceEntry(date(2026, 10, 1), "Карта", Decimal(837000))]
 
 
-def svc(today=date(2026, 10, 1), ops=None, bigs=None, balances=BAL):
-    return FinanceService(MemoryStorage(operations=ops if ops is not None else history(), big_purchases=bigs or [],
-                                        balances=balances), today_fn=lambda: today)
+def svc(ops, today=date(2026, 10, 1), balances=BAL, trips=(TRIP,)):
+    return FinanceService(MemoryStorage(operations=ops, balances=balances, trips=list(trips)), today_fn=lambda: today)
 
 
 def run(c):
     return asyncio.run(c)
 
 
-# ---------- /month ----------
+# ---------- /report: сухая статистика ----------
 
-def test_month_now():
-    ops = [op(date(2026, 10, d), E, a, c) for d, a, c in
-           [(1, 12400, "Продукты домой"), (2, 9800, "Еда вне дома"), (3, 6100, "Транспорт/РЖД"), (3, 5900, "ЖКУ"),
-            (4, 4700, "Подписки"), (5, 3200, "Досуг")]]
-    ops += [op(date(2026, 10, 2), I, 120000, "Зарплата"), op(date(2026, 10, 6), E, 20000, "Маркетплейсы", ["тяжелое"], "ноутбук")]
-    text = run(svc(date(2026, 10, 6), ops).month_text())
-    assert text.splitlines()[:4] == [
-        "📅 <b>Октябрь</b>, 6-й день",
-        f"💸 <b>62{NB}100</b> потрачено",
-        f"🧾 из них тяжелые: 20{NB}000",
-        f"💰 <b>120{NB}000</b> пришло",
-    ]
-    assert "<b>Больше всего:</b>" in text
-    top = text.split("<b>Больше всего:</b>\n")[1].splitlines()
-    assert top[0] == f"📦 Маркетплейсы — 20{NB}000" and len(top) == 5   # столбцом, топ-5
-    assert "обычно" not in text and "⬆️" not in text                      # без сравнений с прошлым
-    all_text = run(svc(date(2026, 10, 6), ops).month_text("all"))
-    assert "🎭 Досуг — 3" in all_text and "💼 Зарплата" in all_text
-    last = run(svc(date(2026, 10, 6), ops).month_text("last"))
-    assert "последние траты" in last and "ноутбук" in last
-
-
-def test_month_now_no_heavy():
-    text = run(svc(date(2026, 10, 6), [op(date(2026, 10, 1), E, 100, "Досуг")]).month_text())
-    assert "🧾 из них тяжелые: —" in text
-
-
-# ---------- итоги месяца ----------
-
-def test_month_close_main():
-    text = run(svc().month_close_text())
-    lines = text.splitlines()
-    assert lines[:5] == [
-        "📊 <b>Сентябрь</b> без тяжелых трат",
-        f"💰 Доход <b>491{NB}тыс</b>",
-        f"💸 Расход <b>121{NB}тыс</b>",
-        f"🟢 Итог <b>+370{NB}тыс</b>",
+def test_report_main():
+    text, heavy, trips = run(svc(september()).month_close_view())
+    assert heavy and trips
+    assert text.splitlines()[:8] == [
+        "📊 <b>Сентябрь 2026</b>",
+        f"💰 Доход <b>491{NB}386</b>",
+        f"💸 Потрачено <b>557{NB}767</b>",
+        f"   🛒 обычные 232{NB}650",
+        f"   🧾 тяжелые 283{NB}122",
+        f"   ✈️ командировки 41{NB}995",
+        f"🔴 Итог <b>−66{NB}381</b> · без тяжелых +216{NB}741",
         f"💼 Капитал на 1 октября <b>837{NB}тыс</b> (на 1 сентября 790{NB}тыс, +47{NB}тыс)",
     ]
-    assert f"<b>Выше обычного:</b>\n👕 Одежда / украшения 82{NB}тыс · обычно 44{NB}тыс" in text
-    assert f"<b>Ниже обычного:</b>\n🚗 Машина 3{NB}тыс · обычно 18{NB}тыс" in text
-    assert "Продукты" not in text                    # +3% — как обычно, не показывается
-    assert "Досуг" not in text                       # отпуск — тяжелая трата, в основной вид не входит
-    assert f"🧾 Тяжелые траты: 1 на 283{NB}тыс" in text
-    assert "отпуск" not in text                      # названий тяжелых в основном виде нет
-    assert "Не учтено" not in text and "сверка" not in text.lower() and "%" not in text
+    assert f"<b>Обычные траты</b>\n👕 Одежда / украшения — 82{NB}291 · 35%" in text
+    assert f"<b>Доходы</b>\n💼 Зарплата — 491{NB}386 · 100%" in text
+    for word in ("обычно", "▲", "▼", "⬆", "выше", "💬"):
+        assert word not in text                       # без аналитики
 
 
-def test_month_close_heavy_view():
-    text = run(svc().month_close_text(view="heavy"))
-    assert f"12.09 🎭 отпуск турция — 283{NB}122" in text
-    assert f"💸 Расход 404{NB}тыс (без них 121{NB}тыс)" in text
-    assert f"🟢 Итог <b>+87{NB}тыс</b> (без них +370{NB}тыс)" in text
-    assert f"🎭 Досуг 288{NB}тыс (без них 5{NB}тыс)" in text
-    assert f"За 12 месяцев: 1 трат на 283{NB}тыс" in text
+def test_report_no_capital_line_without_snapshots():
+    text, _, _ = run(svc(september(), balances=[]).month_close_view())
+    assert "Капитал" not in text
 
 
-def test_sheet_rows_do_not_change_sums():
-    """Строки «Больших покупок» — только зеркало: в расчетах участвует «Вид» операций."""
-    ops = history()[:-2] + [op(date(2026, 9, 12), E, 283122, "Досуг"), op(date(2026, 9, 13), E, 5000, "Досуг")]
-    bigs = [BigPurchase(date(2026, 9, 12), "Отпуск в Турцию", Decimal(283122))]
-    text = run(svc(ops=ops, bigs=bigs).month_close_text())
-    assert f"💸 Расход <b>404{NB}тыс</b>" in text and "Тяжелые траты" not in text
+def test_report_heavy_and_trips_views():
+    heavy, _, _ = run(svc(september()).month_close_view(view="heavy"))
+    assert f"06.09 🎭 Отпуск в Турцию — 283{NB}122" in heavy and f"Всего: <b>283{NB}122</b>" in heavy
+    trips, _, _ = run(svc(september()).month_close_view(view="trips"))
+    assert f"<b>Командировка 6–11.09</b> — 41{NB}995" in trips
+    assert f"🍽 Еда вне дома 14{NB}897" in trips and f"📌 Прочее 20{NB}000" in trips
 
 
-def test_month_close_all_categories_and_no_snapshot():
-    s = svc(balances=[])
-    assert "снимок остатков не заполнен" in run(s.month_close_text())
-    text = run(s.month_close_text(view="all"))
-    assert "все категории без тяжелых трат" in text and "🎭 Досуг — 5" in text and "💼 Зарплата" in text
+def test_report_buttons_only_when_needed():
+    ops = [op(date(2026, 9, 1), I, 100, "Зарплата"), op(date(2026, 9, 2), E, 50, "Досуг")]
+    _, heavy, trips = run(svc(ops).month_close_view())
+    assert not heavy and not trips
 
 
-def test_month_close_without_history():
-    text = run(svc(ops=[op(date(2026, 9, 3), E, 100, "Досуг")], balances=[]).month_close_text())
-    assert "Сравнивать пока не с чем" in text
+# ---------- /month ----------
+
+def test_month_now_streams():
+    ops = [op(date(2026, 10, 1), E, 12400, "Продукты домой"), op(date(2026, 10, 2), I, 120000, "Зарплата"),
+           op(date(2026, 10, 3), E, 20000, "Маркетплейсы", ["тяжелое"], "ноутбук"),
+           op(date(2026, 10, 4), E, 3000, "Еда вне дома", ["поездка-казань-041026"])]
+    text = run(svc(ops, date(2026, 10, 6)).month_text())
+    assert text.splitlines()[:6] == [
+        "📅 <b>Октябрь</b>, 6-й день",
+        f"💸 <b>35{NB}400</b> потрачено",
+        f"   🛒 обычные 12{NB}400",
+        f"   🧾 тяжелые 20{NB}000",
+        f"   ✈️ командировки 3{NB}000",
+        f"💰 <b>120{NB}000</b> пришло",
+    ]
+    assert f"<b>Больше всего</b> (обычные):\n🛒 Продукты домой — 12{NB}400" in text
+    assert "Маркетплейсы" not in text.split("Больше всего")[1]
+
+
+def test_month_now_dashes():
+    text = run(svc([op(date(2026, 10, 1), E, 100, "Досуг")], date(2026, 10, 6)).month_text())
+    assert "   🧾 тяжелые —" in text and "   ✈️ командировки —" in text
+
+
+# ---------- «обычно»: медиана, ▲/▼, тенденции ----------
+
+def history(values: dict[int, int], cat="Досуг", year=2026):
+    """Обычные траты категории по месяцам + зарплата, чтобы месяц считался «с данными»."""
+    ops = []
+    for m, v in values.items():
+        ops.append(op(date(year, m, 1), I, 100000, "Зарплата"))
+        if v:
+            ops.append(op(date(year, m, 5), E, v, cat))
+    return ops
+
+
+def test_usual_median_and_band():
+    ops = history({3: 10000, 4: 12000, 5: 50000, 6: 11000, 7: 9000, 8: 13000})
+    ops.append(op(date(2026, 8, 6), E, 90000, "Досуг", ["тяжелое"]))      # тяжелые не участвуют
+    u = reports.usual(ops, date(2026, 9, 1))
+    assert u.months[0] == date(2026, 3, 1) and len(u.months) == 6
+    assert u.by_category["Досуг"] == 11500                                  # медиана, выброс 50 000 не мешает
+    assert u.band("Досуг") == (9000, 50000)
+
+
+def test_marker_rule():
+    u = reports.usual(history({3: 10000, 4: 12000, 5: 11000, 6: 11000, 7: 9000, 8: 12500}), date(2026, 9, 1))
+    assert u.by_category["Досуг"] == 11000
+    assert u.marker("Досуг", Decimal(12800)) == ""       # выше максимума, но меньше 2 000 от медианы
+    assert u.marker("Досуг", Decimal(16000)) == "▲"
+    assert u.marker("Досуг", Decimal(12400)) == ""       # в пределах min–max
+    assert u.marker("Досуг", Decimal(5000)) == "▼"
+    assert u.marker("Новая", Decimal(5000)) == "▲"       # раньше было 0 во всех месяцах
+    assert reports.usual([], date(2026, 9, 1)).marker("Досуг", Decimal(99999)) == ""
+
+
+def test_trends_rule():
+    ops = history({4: 6000, 5: 7000, 6: 6500, 7: 9000, 8: 9500, 9: 9200}, "Транспорт/РЖД")
+    ops += [op(date(2026, m, 6), E, v, "Машина") for m, v in {4: 18000, 5: 17000, 6: 18000, 7: 3000, 8: 2500, 9: 2700}.items()]
+    ops += [op(date(2026, m, 7), E, v, "Подписки") for m, v in {4: 1000, 5: 1000, 6: 1000, 7: 2000, 8: 2000, 9: 2000}.items()]
+    rising, falling = reports.trends(ops, date(2026, 9, 1))
+    assert [t.name for t in rising] == ["Транспорт/РЖД"]          # +41% и +2 733
+    assert [t.name for t in falling] == ["Машина"]
+    # «Подписки» +100%, но разница 1 000 — не тенденция
+    assert reports.trends(history({8: 1, 9: 1}), date(2026, 9, 1)) is None
 
 
 # ---------- /stats ----------
 
 def stats_ops():
-    ops = []
-    for m, (taxi, car) in {7: (6000, 18000), 8: (7000, 17000), 9: (24000, 3000)}.items():
-        ops += [op(date(2026, m, 1), I, 300000, "Зарплата"), op(date(2026, m, 3), E, taxi, "Транспорт/РЖД"),
-                op(date(2026, m, 4), E, car, "Машина"), op(date(2026, m, 5), E, 30000, "Продукты домой")]
-    ops.append(op(date(2026, 9, 12), E, 283122, "Досуг", ["тяжелое"], "отпуск"))
+    ops = history({4: 6000, 5: 7000, 6: 6500, 7: 9000, 8: 9500, 9: 24000}, "Транспорт/РЖД")
+    ops += [op(date(2026, m, 6), E, 30000, "Продукты домой") for m in range(4, 10)]
+    ops.append(op(date(2026, 9, 6), E, 283122, "Досуг", ["тяжелое"], "Отпуск в Турцию"))
+    ops.append(op(date(2026, 9, 7), E, 41995, "Прочее", [TRIP.tag], "Жилье"))
     return ops
 
 
-def test_stats_text():
-    bal = [BalanceEntry(date(2026, 7, 1), "Карта", Decimal(700000)), BalanceEntry(date(2026, 10, 1), "Карта", Decimal(837000))]
-    text, png = run(svc(ops=stats_ops(), balances=bal).stats_report(3))
-    assert text.splitlines()[0] == "📈 <b>Июль – сентябрь</b>, без тяжелых"
-    assert f"• Расходы растут: 🚆 Транспорт/РЖД (6{NB}тыс → 24{NB}тыс)" in text
-    assert f"• Расходы снижаются: 🚗 Машина (18{NB}тыс → 3{NB}тыс)" in text
-    assert f"• Капитал вырос на 137{NB}тыс" in text
-    assert f"🧾 Тяжелые: 283{NB}тыс" in text
-    assert "Продукты" not in text and "Досуг" not in text
-    assert png[:4] == b"\x89PNG"
-    heavy = run(svc(ops=stats_ops(), balances=bal).stats_heavy_text(3))
-    assert "отпуск" in heavy and "Июль – сентябрь" in heavy
+def test_stats_text_and_tiles():
+    text, png, heavy, trips = run(svc(stats_ops()).stats_view(3, chart=True))
+    assert text.splitlines()[0] == "📈 <b>Июль – сентябрь</b>"
+    assert f"• Расходы растут: 🚆 Транспорт/РЖД (7{NB}тыс → 14{NB}тыс)" in text
+    assert f"🧾 Тяжелые за период: 1 на 283{NB}тыс · ✈️ Командировки: 1 на 42{NB}тыс" in text
+    assert heavy and trips and png[:4] == b"\x89PNG"
+    st = run(svc(stats_ops()).stats(3))
+    tiles = {t.name: t for t in st.tiles}
+    assert set(tiles) == {"Транспорт/РЖД", "Продукты домой"}               # только обычные траты
+    assert tiles["Транспорт/РЖД"].marker == "▲" and tiles["Продукты домой"].marker == ""
+    assert tiles["Транспорт/РЖД"].band == (6000, 9500)
+    assert st.heavy == [0, 0, 283122] and st.trips == [0, 0, 41995]
 
 
-def test_stats_periods_and_empty():
-    st = run(svc(ops=stats_ops()).stats(6))
-    assert st.months[0] == date(2026, 4, 1) and len(st.months) == 6
-    text, png = run(svc(ops=[], balances=[]).stats_report(3))
-    assert "записей нет" in text and png is None
+def test_stats_little_history():
+    short = history({8: 9500, 9: 24000}, "Транспорт/РЖД")
+    text, _, _, _ = run(svc(short).stats_view(3))
+    assert "Мало данных для тенденций" in text and "Расходы растут" not in text
+    text, png, heavy, trips = run(svc([], balances=[]).stats_view(3, chart=True))
+    assert "записей нет" in text and png is None and not heavy and not trips
 
 
-def test_stats_chart_png():
-    st = run(svc(ops=stats_ops(), balances=BAL).stats(3))
-    png = stats_chart(st.months, [s.income for s in st.monthly], [s.expense for s in st.monthly],
-                      st.capital, st.category_series(), "тест")
-    assert png[:4] == b"\x89PNG" and len(png) > 10000
-    assert set(st.category_series()) == {"Транспорт/РЖД", "Машина", "Продукты домой"}   # без тяжелого Досуга
+def test_stats_heavy_and_trips_views():
+    heavy, _, _, _ = run(svc(stats_ops()).stats_view(3, "heavy"))
+    assert "Отпуск в Турцию" in heavy and "Июль – сентябрь" in heavy
+    trips, _, _, _ = run(svc(stats_ops()).stats_view(3, "trips"))
+    assert f"Командировка 6–11.09</b> — 41{NB}995" in trips
 
 
-# ---------- прочие команды в тех же правилах ----------
-
-def test_deviation():
-    assert reports.deviation(Decimal(140), Decimal(100)) == "⬆️ +40%"
-    assert reports.deviation(Decimal(129), Decimal(100)) == ""
-    assert reports.deviation(Decimal(60), Decimal(100)) == "⬇️ −40%"
-    assert reports.deviation(Decimal(11500), Decimal(100)) == "⬆️ ×115"
-    assert reports.deviation(Decimal(320), Decimal(100)) == "⬆️ ×3,2"
-    assert reports.deviation(Decimal(5), None) == ""
+def test_stats_chart_many_tiles():
+    ops = stats_ops() + [op(date(2026, 9, 9), E, 1000 * (i + 1), f"Кат{i}") for i in range(14)]
+    st = run(svc(ops).stats(6))
+    assert len(st.tiles) == reports.MAX_TILES
+    assert stats_chart(st, "тест")[:4] == b"\x89PNG"
 
 
-def test_compare():
-    text = run(svc(ops=stats_ops()).compare_text("август сентябрь"))
-    assert "Август 2026 → сентябрь 2026</b>, без тяжелых" in text
-    assert f"🚆 Транспорт/РЖД: 7{NB}000 → 24{NB}000  ⬆️ ×3,4" in text
-    assert f"🛒 Продукты домой: 30{NB}000 → 30{NB}000" in text and "Досуг" not in text
-    assert "%" not in text.split("⬆️ ×3,4")[0].split("Итог")[0].replace("⬆️ ×", "")
+# ---------- /cat, /compare, сигналы — та же «обычно» ----------
 
-
-def test_big_and_cat():
-    s = svc(date(2026, 10, 6), ops=stats_ops())
-    big = run(s.big_text())
-    assert f"1 на <b>283{NB}тыс</b>" in big and "12.09 🎭 отпуск" in big
+def test_cat_and_compare_use_median():
+    s = svc(stats_ops(), date(2026, 10, 6))
     cat = run(s.category_text("транспорт"))
-    assert "Прошлые месяцы</b> (без тяжелых)" in cat and f"Обычно: <b>12{NB}333</b> в месяц" in cat
+    assert "Обычно (медиана): <b>8" in cat and "Прошлые месяцы</b> (обычные траты)" in cat
+    cmp = run(s.compare_text("август сентябрь"))
+    assert f"🚆 Транспорт/РЖД: 9{NB}500 → 24{NB}000 ▲" in cmp
+    assert f"🛒 Продукты домой: 30{NB}000 → 30{NB}000" in cmp and "Досуг" not in cmp
 
 
-def test_signals_clean():
+def test_signals_use_median_and_regular_only():
     ops = stats_ops() + [op(date(2026, 10, 3), E, 30000, "Транспорт/РЖД"),
                          op(date(2026, 10, 4), E, 900000, "Досуг", ["тяжелое"])]
-    keys = [k for k, _ in run(svc(date(2026, 10, 20), ops).signals())]
+    keys = [k for k, _ in run(svc(ops, date(2026, 10, 20)).signals())]
     assert "cat:2026-10:Транспорт/РЖД" in keys and "cat:2026-10:Досуг" not in keys

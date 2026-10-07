@@ -19,10 +19,10 @@ async def send_stats(bot: Bot, chat_id: int, svc: FinanceService, n: int = 3) ->
     """Картинка с графиками и текст с выводами (/stats; 1 янв/апр/июл/окт — за 3 месяца)."""
     from .handlers import stats_keyboard
 
-    text, png = await svc.stats_report(n)
+    text, png, heavy, trips = await svc.stats_view(n, chart=True)
     if png:
         await bot.send_photo(chat_id, BufferedInputFile(png, "stats.png"))
-    await bot.send_message(chat_id, text, reply_markup=stats_keyboard(n, "main"))
+    await bot.send_message(chat_id, text, reply_markup=stats_keyboard(n, "main", heavy, trips))
 
 
 async def send_month_close(bot: Bot, chat_id: int, svc: FinanceService) -> None:
@@ -30,7 +30,8 @@ async def send_month_close(bot: Bot, chat_id: int, svc: FinanceService) -> None:
     from .handlers import report_keyboard
 
     month = reports.add_months(svc.today(), -1)
-    await bot.send_message(chat_id, await svc.month_close_text(month), reply_markup=report_keyboard(month, "main"))
+    text, heavy, trips = await svc.month_close_view(month)
+    await bot.send_message(chat_id, text, reply_markup=report_keyboard(month, "main", heavy, trips))
     svc.state.mark_month_closed(svc.today().strftime("%Y-%m"))
     if svc.today().month in reports.QUARTER_START_MONTHS:
         try:

@@ -246,29 +246,33 @@ class FinanceService:
         await self._categories()
         return await self.storage.list_operations()
 
+    def _now_text(self, title: str, ops: list[Operation], start: date, end: date) -> str:
+        full = reports.summarize(ops, start, end)
+        regular = reports.summarize_clean(ops, start, end)
+        heavy = sum((b.amount for b in reports.heavy_items(ops, start, end)), Decimal(0))
+        trips = reports.trip_spending(ops, start, end)
+        return reports.format_now(title, full, regular, heavy, trips, self.cur, self._icons)
+
     async def month_text(self, view: str = "main") -> str:
         """Текущий месяц: "main" — сводка, "all" — все категории, "last" — последние траты."""
         today = self.today()
         ops = await self._data()
         first = reports.month_start(today)
-        s = reports.summarize(ops, first, today)
         if view == "all":
+            s = reports.summarize(ops, first, today)
             return reports.format_all_categories(f"📋 {reports.month_now_title(today)}: все категории", s, self.cur, self._icons)
         if view == "last":
+            await self._trips()
             recent = [op for op in ops if first <= op.date <= today and op.type == OpType.EXPENSE][-15:]
             lines = [f"🕑 {reports.month_now_title(today)}: последние траты"]
             lines += [self.describe_short(op) for op in reversed(recent)] or ["Трат пока нет."]
             return "\n".join(lines)
-        heavy = sum((b.amount for b in reports.heavy_items(ops, first, today)), Decimal(0))
-        return reports.format_now(reports.month_now_title(today), s, heavy, self.cur, self._icons)
+        return self._now_text(reports.month_now_title(today), ops, first, today)
 
     async def week_text(self) -> str:
         today = self.today()
-        ops = await self._data()
         start = reports.week_start(today)
-        s = reports.summarize(ops, start, today)
-        heavy = sum((b.amount for b in reports.heavy_items(ops, start, today)), Decimal(0))
-        return reports.format_now(reports.week_title(start, today), s, heavy, self.cur, self._icons)
+        return self._now_text(reports.week_title(start, today), await self._data(), start, today)
 
     async def category_text(self, query: str) -> str:
         cats = find_category(query, await self._categories())
@@ -287,15 +291,21 @@ class FinanceService:
         accounts = [a.name for a in await self.storage.list_accounts()]
         return reports.month_close(ops, await self.storage.list_balances(), month, accounts)
 
-    async def month_close_text(self, month: date | None = None, view: str = "main") -> str:
-        """Итоги месяца (по умолчанию прошлого): "main", "heavy" — тяжелые траты, "all" — все категории."""
+    async def month_close_view(self, month: date | None = None, view: str = "main") -> tuple[str, bool, bool]:
+        """Итоги месяца (по умолчанию прошлого): "main" — сухая статистика, "heavy" — тяжелые,
+        "trips" — командировки. Возвращает (текст, есть тяжелые, есть командировки) — для кнопок."""
         mc = await self.month_close(month)
+        title = reports.month_title(mc.month)
         if view == "heavy":
-            ops = await self._data()
-            return reports.format_month_heavy(mc, ops, self.cur, self._icons)
-        if view == "all":
-            return reports.format_month_categories(mc, self.cur, self._icons)
-        return reports.format_month_close(mc, self.cur, self._icons)
+            text = reports.format_heavy_view(title, mc.heavy, self.cur, self._icons)
+        elif view == "trips":
+            text = reports.format_trips_view(title, mc.trip_ops, await self._trips(), self.cur, self._icons)
+        else:
+            text = reports.format_month_close(mc, self.cur, self._icons)
+        return text, bool(mc.heavy), bool(mc.trip_ops)
+
+    async def month_close_text(self, month: date | None = None, view: str = "main") -> str:
+        return (await self.month_close_view(month, view))[0]
 
     monthly_report_text = month_close_text
 
@@ -303,24 +313,29 @@ class FinanceService:
         ops = await self._data()
         return reports.stats(ops, await self.storage.list_balances(), self.today(), n)
 
-    async def stats_report(self, n: int = 3) -> tuple[str, bytes | None]:
-        """Текст /stats и картинка с графиками."""
+    async def stats_view(self, n: int = 3, view: str = "main", chart: bool = False) -> tuple[str, bytes | None, bool, bool]:
+        """/stats: (текст, картинка — если chart и есть данные, есть тяжелые, есть командировки)."""
         st = await self.stats(n)
+        title = reports.stats_title(st)
+        if view == "heavy":
+            text = reports.format_heavy_view(title, st.heavy_items, self.cur, self._icons)
+        elif view == "trips":
+            text = reports.format_trips_view(title, st.trip_ops, await self._trips(), self.cur, self._icons)
+        else:
+            text = reports.format_stats(st, self.cur, self._icons)
         png = None
-        if any(s.count for s in st.monthly):
+        if chart and st.has_data:
             try:
                 from .charts import stats_chart
 
-                png = await asyncio.to_thread(
-                    stats_chart, st.months, [s.income for s in st.monthly], [s.expense for s in st.monthly],
-                    st.capital, st.category_series(), f"{reports.stats_title(st)} · без тяжелых трат",
-                )
+                png = await asyncio.to_thread(stats_chart, st, f"{title} · обычные траты по категориям")
             except Exception:
                 log.exception("Не удалось нарисовать графики")
-        return reports.format_stats(st, self.cur, self._icons), png
+        return text, png, bool(st.heavy_items), bool(st.trip_ops)
 
-    async def stats_heavy_text(self, n: int = 3) -> str:
-        return reports.format_stats_heavy(await self.stats(n), self.cur, self._icons)
+    async def stats_report(self, n: int = 3) -> tuple[str, bytes | None]:
+        text, png, _, _ = await self.stats_view(n, chart=True)
+        return text, png
 
     async def signals(self) -> list[tuple[str, str]]:
         ops = await self._data()

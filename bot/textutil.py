@@ -65,3 +65,12 @@ def month_title(d: date) -> str:
 
 def fmt_percent(value: Decimal | float) -> str:
     return f"{round(float(value))}%"
+
+
+def fmt_trip_range(start: date, end: date) -> str:
+    """«13–16.10», «30.12–2.01», «3.10»."""
+    if start == end:
+        return f"{start.day}.{start:%m}"
+    if (start.month, start.year) == (end.month, end.year):
+        return f"{start.day}–{end.day}.{end:%m}"
+    return f"{start.day}.{start:%m}–{end.day}.{end:%m}"

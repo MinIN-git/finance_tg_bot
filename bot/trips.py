@@ -9,7 +9,7 @@ from typing import Sequence
 
 from .models import Operation, OpType, Trip
 from .reports import deviation
-from .textutil import fmt_money
+from .textutil import fmt_money, fmt_trip_range
 
 ZERO = Decimal(0)
 DATE_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{2}|\d{4}))?$")
@@ -60,11 +60,7 @@ def parse_trip_args(args: str, today: date) -> tuple[str, date, date]:
 
 
 def fmt_range(t: Trip) -> str:
-    if t.start == t.end:
-        return f"{t.start:%d.%m}".lstrip("0")
-    if (t.start.month, t.start.year) == (t.end.month, t.end.year):
-        return f"{t.start.day}–{t.end:%d.%m}".replace(f"–0{t.end.day}.", f"–{t.end.day}.")
-    return f"{t.start.day}.{t.start:%m}–{t.end.day}.{t.end:%m}"
+    return fmt_trip_range(t.start, t.end)
 
 
 def trip_ops(trip: Trip, ops: Sequence[Operation]) -> list[Operation]:

@@ -79,12 +79,12 @@ class MonthView(CallbackData, prefix="mv"):
 
 class ReportView(CallbackData, prefix="rv"):
     month: str  # ГГГГ-ММ
-    view: str   # main | heavy | all
+    view: str   # main | heavy | trips
 
 
 class StatsView(CallbackData, prefix="sv"):
     n: int
-    view: str   # main | heavy
+    view: str   # main | heavy | trips
 
 
 class TripMark(CallbackData, prefix="tm"):
@@ -129,27 +129,34 @@ def month_keyboard(view: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def report_keyboard(month, view: str) -> InlineKeyboardMarkup:
+def report_keyboard(month, view: str, has_heavy: bool, has_trips: bool) -> InlineKeyboardMarkup | None:
     key = month.strftime("%Y-%m")
     kb = InlineKeyboardBuilder()
     if view == "main":
-        kb.button(text="🧾 Тяжелые траты", callback_data=ReportView(month=key, view="heavy"))
-        kb.button(text="📋 Все категории", callback_data=ReportView(month=key, view="all"))
+        if has_heavy:
+            kb.button(text="🧾 Тяжелые", callback_data=ReportView(month=key, view="heavy"))
+        if has_trips:
+            kb.button(text="✈️ Командировка", callback_data=ReportView(month=key, view="trips"))
     else:
         kb.button(text=BACK, callback_data=ReportView(month=key, view="main"))
-    return kb.as_markup()
+    markup = kb.as_markup()
+    return markup if markup.inline_keyboard else None
 
 
-def stats_keyboard(n: int, view: str) -> InlineKeyboardMarkup:
+def stats_keyboard(n: int, view: str, has_heavy: bool, has_trips: bool) -> InlineKeyboardMarkup | None:
     kb = InlineKeyboardBuilder()
     if view == "main":
-        kb.button(text="🧾 Тяжелые траты", callback_data=StatsView(n=n, view="heavy"))
+        if has_heavy:
+            kb.button(text="🧾 Тяжелые", callback_data=StatsView(n=n, view="heavy"))
+        if has_trips:
+            kb.button(text="✈️ Командировки", callback_data=StatsView(n=n, view="trips"))
     else:
         kb.button(text=BACK, callback_data=StatsView(n=n, view="main"))
-    return kb.as_markup()
+    markup = kb.as_markup()
+    return markup if markup.inline_keyboard else None
 
 
-async def _edit(call: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
+async def _edit(call: CallbackQuery, text: str, kb: InlineKeyboardMarkup | None) -> None:
     try:
         await call.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest:  # «message is not modified» при повторном нажатии
@@ -255,7 +262,8 @@ async def cmd_week(message: Message, svc: FinanceService) -> None:
 @router.message(Command("report"))
 async def cmd_report(message: Message, svc: FinanceService) -> None:
     month = reports.add_months(svc.today(), -1)
-    await message.answer(await svc.month_close_text(month), reply_markup=report_keyboard(month, "main"))
+    text, heavy, trips = await svc.month_close_view(month)
+    await message.answer(text, reply_markup=report_keyboard(month, "main", heavy, trips))
 
 
 @router.message(Command("cat"))
@@ -424,16 +432,14 @@ async def on_report_view(call: CallbackQuery, callback_data: ReportView, svc: Fi
 
     year, month = map(int, callback_data.month.split("-"))
     first = date(year, month, 1)
-    await _edit(call, await svc.month_close_text(first, callback_data.view), report_keyboard(first, callback_data.view))
+    text, heavy, trips = await svc.month_close_view(first, callback_data.view)
+    await _edit(call, text, report_keyboard(first, callback_data.view, heavy, trips))
 
 
 @router.callback_query(StatsView.filter())
 async def on_stats_view(call: CallbackQuery, callback_data: StatsView, svc: FinanceService) -> None:
-    if callback_data.view == "heavy":
-        text = await svc.stats_heavy_text(callback_data.n)
-    else:
-        text, _ = await svc.stats_report(callback_data.n)
-    await _edit(call, text, stats_keyboard(callback_data.n, callback_data.view))
+    text, _, heavy, trips = await svc.stats_view(callback_data.n, callback_data.view)
+    await _edit(call, text, stats_keyboard(callback_data.n, callback_data.view, heavy, trips))
 
 
 # ---------- ввод операций ----------
