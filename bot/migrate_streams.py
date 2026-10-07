@@ -7,6 +7,8 @@
    категорию и id операции в строку листа.
 2. Переносит поездки из старого листа «Командировки»: заводит поездку в «Поездки» и по операции вида
    «командировка» на каждую статью; для поездок с вычетом уменьшает #импорт-операции месяца по маппингу статей.
+   Если даты поездки в листе исправили, ранее перенесенные операции сдвигаются на новые даты, а старая
+   поездка удаляется.
 3. Существующим операциям с #тяжелое или тегом поездки проставляет «Вид».
 
 Повторный запуск ничего не дублирует: созданные операции связаны с исходными строками через id
@@ -53,8 +55,8 @@ TRIP_ITEM_MAP: dict[str, str] = {
     "прочее": "Прочее",
 }
 
-# Поездки, траты которых нужно вычесть из #импорт-операций (остальные — до начала истории).
-DEDUCT_TRIPS: set[date] = {date(2026, 9, 6)}
+# Поездки, траты которых нужно вычесть из #импорт-операций (их статьи сидят в категориях «Бюджета»).
+DEDUCT_TRIPS: set[date] = {date(2026, 7, 13), date(2026, 9, 6)}
 
 
 # ---------- разбор листа «Командировки» ----------
@@ -163,6 +165,8 @@ class Plan:
     reductions: list[Reduction] = field(default_factory=list)
     new_trips: list[Trip] = field(default_factory=list)
     kind_fixes: list[Operation] = field(default_factory=list)
+    moves: list[tuple[Operation, Operation]] = field(default_factory=list)   # (было, стало) — исправленные даты поездки
+    stale_trips: list[Trip] = field(default_factory=list)                    # поездки, которых больше нет в листе
     done: list[str] = field(default_factory=list)       # что уже перенесено ранее
     warnings: list[str] = field(default_factory=list)
 
@@ -232,6 +236,11 @@ def build_plan(
 
     # 2. поездки из листа «Командировки»
     existing_trips = {t.id: t for t in trips}
+    sheet_ids = {Trip(TRIP_CITY, ot.start, ot.end).id for ot in old_trips}
+    # Поездки, заведенные миграцией раньше, которых в листе больше нет (даты в листе исправили):
+    # их операции переносятся на поездку с исправленными датами, а сами они удаляются.
+    stale = {t.tag: t for t in trips if t.city == TRIP_CITY and t.id not in sheet_ids}
+    moved_ids: set[str] = set()
     for ot in old_trips:
         trip = Trip(TRIP_CITY, ot.start, ot.end)
         what = f"Поездка {ot.start:%d.%m}–{ot.end:%d.%m.%Y}"
@@ -247,7 +256,15 @@ def build_plan(
                 continue
             marker = f"[{trip.id} {label}]"
             op = next((o for o in ops if trip.tag in o.tags and marker in o.comment), None)
-            if op is None:
+            old = None if op else next((
+                o for o in ops if o.id not in moved_ids and trip_tag(o) in stale and abs(o.amount - amount) < TOLERANCE
+                and f" {label}]" in o.comment and f"[{stale[trip_tag(o)].id} {label}]" in o.comment), None)
+            if old is not None:
+                op = replace(old, date=ot.start, tags=[t for t in old.tags if t != trip_tag(old)] + [trip.tag],
+                             comment=f"{label} {marker}", kind=Kind.TRIP)
+                plan.moves.append((old, op))
+                moved_ids.add(old.id)
+            elif op is None:
                 op = Operation(date=ot.start, type=OpType.EXPENSE, amount=amount, category=category, account=account,
                                comment=f"{label} {marker}", tags=[trip.tag], kind=Kind.TRIP)
                 plan.new_ops.append(op)
@@ -256,8 +273,19 @@ def build_plan(
             if ot.start in deduct:
                 _plan_reduction(plan, ops, category, ot.start, amount, f"[{trip.id} {label}]", f"{what}, {label}")
 
+    # старые поездки удаляются, когда на них не осталось операций (после переноса)
+    for tag, t in stale.items():
+        left = [o for o in ops if trip_tag(o) == tag and o.id not in moved_ids]
+        if not left:
+            plan.stale_trips.append(t)
+        else:
+            plan.warnings.append(f"Поездки {t.city} {t.start:%d.%m.%Y}–{t.end:%d.%m.%Y} нет в листе, но на ней "
+                                 f"{len(left)} операций — оставляю как есть")
+
     # 3. «Вид» у существующих операций с тегами
     for op in ops:
+        if op.id in moved_ids:
+            continue
         if op.type == OpType.EXPENSE and (HEAVY_TAG in op.tags or trip_tag(op)):
             plan.kind_fixes.append(replace(op, kind=kind_from_tags(op.tags)))
     return plan
@@ -273,6 +301,14 @@ def format_plan(plan: Plan) -> str:
         lines.append("Новые операции:")
         for op in plan.new_ops:
             lines.append(f"  + {op.date:%d.%m.%Y} {op.kind.value:<12} {m(op.amount):>12}  {op.category:<20} {op.comment}")
+    if plan.moves:
+        lines.append("Перенести операции на исправленные даты поездки:")
+        for old, new in plan.moves:
+            lines.append(f"  ↪ {old.date:%d.%m.%Y} → {new.date:%d.%m.%Y} {m(new.amount):>12}  {new.category:<20} "
+                         f"{new.comment}")
+    if plan.stale_trips:
+        lines.append("Удалить из «Поездок» (дат больше нет в листе):")
+        lines += [f"  − {t.city} {t.start:%d.%m.%Y}–{t.end:%d.%m.%Y}" for t in plan.stale_trips]
     if plan.reductions:
         lines.append("Уменьшить #импорт-операции:")
         left: dict[str, Decimal] = {}
@@ -292,7 +328,7 @@ def format_plan(plan: Plan) -> str:
         lines.append(f"  ✓ {d}")
     for w in plan.warnings:
         lines.append(f"⚠️  {w}")
-    if not (plan.new_ops or plan.reductions or plan.new_trips or plan.links):
+    if not (plan.new_ops or plan.reductions or plan.new_trips or plan.links or plan.moves or plan.stale_trips):
         lines.append("Переносить нечего — все уже сделано.")
     return "\n".join(lines)
 
@@ -311,9 +347,12 @@ async def apply_plan(storage: Storage, plan: Plan) -> None:
         imp = reduced.get(r.import_op.id, r.import_op)
         reduced[imp.id] = replace(imp, amount=imp.amount - r.amount, comment=f"{imp.comment} {r.marker}".strip())
     updates = {op.id: op for op in plan.kind_fixes}
+    updates.update({new.id: new for _, new in plan.moves})
     updates.update(reduced)            # у #импорт-операций вид не меняется, вычет важнее
     if updates:
         await storage.update_operations(list(updates.values()))
+    for t in plan.stale_trips:         # последним: пока операции не перенесены, старая поездка нужна для поиска
+        await storage.delete_trip(t.id)
 
 
 # ---------- запуск ----------

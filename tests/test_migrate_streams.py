@@ -22,6 +22,9 @@ def imp(d, amount, cat):
 def history():
     return [
         imp(date(2026, 7, 31), 107000, "Семейные расходы"),
+        imp(date(2026, 7, 31), "47656.03", "Еда вне дома"),
+        imp(date(2026, 7, 31), 8897, "Транспорт/РЖД"),
+        imp(date(2026, 7, 31), 37980, "Прочее"),
         imp(date(2026, 8, 31), 87440, "Одежда / украшения"),
         imp(date(2026, 8, 31), 68838, "Подарки"),
         imp(date(2026, 9, 30), 287552, "Досуг"),
@@ -260,3 +263,71 @@ def test_full_migration_on_sheets_with_few_reads(monkeypatch):
     fresh = SheetsStorage("key.json", "sheet-id", cache_ttl=3600)
     again = run(ms.make_plan(fresh, args()))
     assert not (again.new_ops or again.reductions or again.new_trips or again.links)
+
+
+
+# ---------- исправленные даты поездки: 13.06 → 13.07 ----------
+
+def july_sheet():
+    fixed = [list(r) for r in TRIPS_FORMATTED]
+    fixed[2][0] = "13.07.2026 – 16.07.2026"
+    raw = [list(r) for r in TRIPS_RAW]
+    raw[2][0] = "13.07.2026 – 16.07.2026"
+    return fixed, raw
+
+
+def server_state():
+    """Как на сервере: миграция уже применена по листу с ошибочной датой (июнь, без вычетов)."""
+    st = storage()
+    run(ms.apply_plan(st, run(ms.make_plan(st, args()))))
+    st.sheets["Командировки"] = july_sheet()
+    return st
+
+
+def test_trip_dates_fixed_moves_ops_and_deducts_july():
+    st = server_state()
+    plan = run(ms.make_plan(st, args()))
+    assert not plan.warnings
+    assert [t.id for t in plan.new_trips] == ["командировка-130726"]
+    assert [t.id for t in plan.stale_trips] == ["командировка-130626"]
+    assert not plan.new_ops and len(plan.moves) == 4
+    assert all(new.date == date(2026, 7, 13) and "[командировка-130726 " in new.comment for _, new in plan.moves)
+    cut = [(r.import_op.category, r.amount) for r in plan.reductions]
+    assert cut == [("Еда вне дома", Decimal("14588.13")), ("Транспорт/РЖД", Decimal(2757)),
+                   ("Прочее", Decimal(12700)), ("Транспорт/РЖД", Decimal(3598))]
+    text = ms.format_plan(plan)
+    assert "Перенести операции на исправленные даты" in text and "8 897 →" in text.replace("\u00a0", " ")
+
+    run(ms.apply_plan(st, plan))
+    ops = run(st.list_operations())
+    july = {o.category: o.amount for o in ops if "импорт" in o.tags and o.date.month == 7}
+    assert july["Транспорт/РЖД"] == 2542 and july["Прочее"] == 25280
+    assert july["Еда вне дома"] == Decimal("47656.03") - Decimal("14588.13")
+    assert not [o for o in ops if o.date.month == 6]
+    assert reports.trip_spending(ops, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("33643.13")
+    assert {t.id for t in run(st.list_trips())} == {"командировка-130726", "командировка-060926"}
+    again = run(ms.make_plan(st, args()))
+    assert not (again.new_ops or again.moves or again.reductions or again.new_trips or again.stale_trips)
+
+
+def test_trip_dates_fix_survives_crash_at_any_step():
+    clean = server_state()
+    run(ms.apply_plan(clean, run(ms.make_plan(clean, args()))))
+    expected = snapshot(clean)
+    for k in range(1, 4):            # новая поездка, правки операций, удаление старой поездки
+        base = server_state()
+        st = FlakyStorage(k, operations=run(base.list_operations()), big_purchases=run(base.list_big_purchases()),
+                          trips=run(base.list_trips()), sheets=base.sheets)
+
+        async def failing_delete(trip_id, st=st):
+            st._tick()
+            await MemoryStorage.delete_trip(st, trip_id)
+
+        st.delete_trip = failing_delete
+        try:
+            run(ms.apply_plan(st, run(ms.make_plan(st, args()))))
+        except Crash:
+            pass
+        st.crash_at = -1
+        run(ms.apply_plan(st, run(ms.make_plan(st, args()))))
+        assert snapshot(st) == expected, f"обрыв на шаге {k}"
