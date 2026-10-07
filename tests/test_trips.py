@@ -99,13 +99,13 @@ def test_trip_buttons_in_chat():
     out = h.click(kb["✈️ В Казань"])
     assert "✈️ Казань" in texts(out)[0] and "✖️ Не командировка" in buttons(out)
     trips_text = texts(h.text("/командировки"))[0]
-    assert "<b>Казань</b> 13–16.10" in trips_text and "🚆 Билеты 12" in trips_text
+    assert "<b>Казань</b> 13–16.10" in trips_text and "🚆 Транспорт/РЖД 12" in trips_text
     # статью можно сменить кнопкой
     kb = buttons(h.text("13000 билеты ржд"))
     out = h.click(kb["✈️ В Казань"])
     kb = buttons(out)
-    assert "🧳 Статья: Билеты" in kb
-    out = h.click(kb["🧳 Статья: Билеты"])
+    assert "🧳 Статья: Транспорт/РЖД" in kb
+    out = h.click(kb["🧳 Статья: Транспорт/РЖД"])
     out = h.click(buttons(out)["🏨 Жилье"])
     assert "🏨 Жилье" in texts(out)[0]
 
@@ -114,13 +114,13 @@ def test_trip_buttons_in_chat():
 @pytest.mark.parametrize("comment,category,expected", [
     ("отель Казань", "Досуг", "Жилье"),
     ("посуточно квартира", "Прочее", "Жилье"),
-    ("билеты ржд", "Транспорт/РЖД", "Билеты"),
-    ("самолет", "Транспорт/РЖД", "Билеты"),
-    ("такси до вокзала", "Транспорт/РЖД", "Транспорт"),
+    ("билеты ржд", "Транспорт/РЖД", "Транспорт/РЖД"),
+    ("самолет", "Прочее", "Транспорт/РЖД"),
+    ("такси до вокзала", "Досуг", "Транспорт/РЖД"),
     ("обед", "Еда вне дома", "Кафешки"),
     ("сувенир", "Подарки", "Прочее"),
-    ("метро", "Прочее", "Транспорт"),
-    ("ЖД билеты [командировка-130726 ЖД билеты]", "Транспорт/РЖД", "Билеты"),
+    ("метро", "Прочее", "Транспорт/РЖД"),
+    ("ЖД билеты [командировка-130726 ЖД билеты]", "Прочее", "Транспорт/РЖД"),
     ("Жилье [командировка-060926 Жилье]", "Прочее", "Жилье"),
 ])
 def test_guess_trip_item(comment, category, expected):
@@ -140,3 +140,11 @@ def test_trip_item_on_input_and_kind_changes():
     assert regular.trip_item == "" and regular.kind.value == "обычная"
     back = run(svc.toggle_trip(hotel.op.id, True))
     assert back.trip_item == "Жилье"                   # заново по словам
+
+
+
+def test_legacy_item_names_map_to_transport():
+    from bot.models import Kind, Operation, OpType
+    for old in ("Билеты", "Транспорт", "ЖД билеты"):
+        o = Operation(date(2026, 9, 6), OpType.EXPENSE, Decimal(1), "Прочее", kind=Kind.TRIP, trip_item=old)
+        assert o.trip_item == "Транспорт/РЖД"

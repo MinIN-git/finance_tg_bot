@@ -77,8 +77,7 @@ def test_report_heavy_and_trips_views():
     trips, _, _ = run(svc(september()).month_close_view(view="trips"))
     assert f"<b>Командировка 6–11.09</b> — 41{NB}995" in trips
     lines = trips.split("<b>Командировка 6–11.09</b>")[1].splitlines()[1:]
-    assert lines == [f"   🏨 Жилье 20{NB}000", f"   🍽 Кафешки 14{NB}897", f"   🚆 Билеты 6{NB}172",
-                     f"   🚕 Транспорт 926"]
+    assert lines == [f"   🏨 Жилье 20{NB}000", f"   🍽 Кафешки 14{NB}897", f"   🚆 Транспорт/РЖД 7{NB}098"]
     assert "Прочее" not in trips                       # статьи поездки, а не категории
 
 
@@ -90,8 +89,8 @@ def test_trip_view_bot_entered_ops_by_items():
            op(date(2026, 9, 9), E, 300, "Подарки", [TRIP.tag], "сувенир")]
     text, _, _ = run(svc(ops).month_close_view(view="trips"))
     lines = text.split("</b> — ")[1].splitlines()[1:]
-    assert lines == [f"   🏨 Жилье 5{NB}000", f"   🚆 Билеты 3{NB}000", "   🍽 Кафешки 900",
-                     "   🚕 Транспорт 400", "   📌 Прочее 300"]
+    assert lines == [f"   🏨 Жилье 5{NB}000", f"   🚆 Транспорт/РЖД 3{NB}400", "   🍽 Кафешки 900",
+                     "   📌 Прочее 300"]
 
 
 def test_report_buttons_only_when_needed():
