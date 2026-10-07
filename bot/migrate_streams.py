@@ -84,18 +84,41 @@ def _cell(grid: Sequence[Sequence[Any]], r: int, c: int) -> Any:
     return grid[r][c] if 0 <= r < len(grid) and 0 <= c < len(grid[r]) else ""
 
 
-def _amount_right(formatted, raw, r: int, c: int) -> Decimal | None:
-    for k in range(1, 4):
-        rv, fv = _cell(raw, r, c + k), _cell(formatted, r, c + k)
+ROW_NUMBER = re.compile(r"^№?\s*\d+[.)]?$")
+
+
+def _is_number(raw: Any, formatted: Any) -> bool:
+    return (isinstance(raw, (int, float)) and not isinstance(raw, bool)) or bool(
+        str(formatted).strip() and re.fullmatch(r"[\d\s\u00a0.,₽-]+", str(formatted).strip()))
+
+
+def _read_row(formatted, raw, r: int, c: int, width: int = 5) -> tuple[str, Decimal | None, bool]:
+    """(статья, сумма, это строка итога). Номер строки («1», «2.») пропускается; сумма — первое
+    число правее названия статьи."""
+    label, label_col, is_total = "", None, False
+    for cc in range(c, c + width):
+        fv, rv = _cell(formatted, r, cc), _cell(raw, r, cc)
+        text = str(fv).strip()
+        if not text:
+            continue
+        if _norm(text).startswith(TOTAL_LABEL) or _norm(text) == "итого":
+            is_total = True
+        if label_col is None and not ROW_NUMBER.match(text) and not _is_number(rv, fv):
+            label, label_col = text, cc
+    if label_col is None:
+        return "", None, is_total
+    for cc in range(label_col + 1, c + width):
+        fv, rv = _cell(formatted, r, cc), _cell(raw, r, cc)
         if isinstance(rv, (int, float)) and not isinstance(rv, bool):
-            return Decimal(str(rv))
-        if str(fv).strip() and re.search(r"\d", str(fv)):
-            return cell_to_decimal(fv)
-    return None
+            return label, Decimal(str(rv)), is_total
+        if _is_number(rv, fv):
+            return label, cell_to_decimal(fv), is_total
+    return label, None, is_total
 
 
 def parse_trips_sheet(formatted: Sequence[Sequence[Any]], raw: Sequence[Sequence[Any]]) -> list[OldTrip]:
-    """Блоки: заголовок «ДД.ММ.ГГГГ – ДД.ММ.ГГГГ», ниже статьи с суммами справа, «Расход за командировку»."""
+    """Блоки: заголовок «ДД.ММ.ГГГГ – ДД.ММ.ГГГГ»; ниже «Расходы | Сумма», строки «№ | Статья | Сумма»
+    и «Итого | Расход за командировку | Сумма»."""
     trips = []
     for r, row in enumerate(formatted):
         for c, value in enumerate(row):
@@ -108,19 +131,16 @@ def parse_trips_sheet(formatted: Sequence[Sequence[Any]], raw: Sequence[Sequence
             trip = OldTrip(start, end, cell=f"{chr(65 + c)}{r + 1}" if c < 26 else str(c))
             rr = r + 1
             while rr < len(formatted):
-                label = str(_cell(formatted, rr, c)).strip()
-                if RANGE_RE.search(label):
+                if any(RANGE_RE.search(str(_cell(formatted, rr, cc))) for cc in range(c, c + 5)):
                     break
-                amount = _amount_right(formatted, raw, rr, c)
+                label, amount, is_total = _read_row(formatted, raw, rr, c)
+                if is_total:
+                    trip.total = amount
+                    break
                 if not label and amount is None:
                     if trip.items:   # пустая строка после статей — конец блока
                         break
-                    rr += 1
-                    continue
-                if _norm(label).startswith(TOTAL_LABEL):
-                    trip.total = amount
-                    break
-                if label and amount:
+                elif label and amount:
                     trip.items.append((label, amount))
                 rr += 1
             trips.append(trip)
