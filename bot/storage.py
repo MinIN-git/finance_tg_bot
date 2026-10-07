@@ -99,6 +99,18 @@ class Storage(ABC):
         """Вписать категорию и id операции в существующую строку «Больших покупок» (без id)."""
         raise NotImplementedError
 
+    async def link_big_purchases(self, links: list[tuple[BigPurchase, str, str]]) -> int:
+        n = 0
+        for item, op_id, category in links:
+            n += await self.link_big_purchase(item, op_id, category)
+        return n
+
+    async def update_operations(self, ops: list[Operation]) -> int:
+        n = 0
+        for op in ops:
+            n += await self.update_operation(op)
+        return n
+
     async def read_sheet(self, title: str) -> tuple[list[list[Any]], list[list[Any]]] | None:
         """Произвольный лист: (отформатированные значения, «сырые»); None — листа нет."""
         return None
@@ -384,6 +396,7 @@ class SheetsStorage(Storage):
         self._gc = gspread.service_account(filename=credentials_file)
         self._sh = self._gc.open_by_key(spreadsheet_id)
         self._ttl = cache_ttl
+        self._sleep = time.sleep
         self._lock = asyncio.Lock()
         self._ops: list[Operation] | None = None
         self._ops_loaded_at = 0.0
@@ -457,8 +470,23 @@ class SheetsStorage(Storage):
         )
         return values[1:]  # без заголовка
 
+    RETRY_DELAYS = (5, 10, 20, 40, 60)   # паузы при 429 (квота Google Sheets на запросы в минуту)
+
+    def call(self, fn, *args, **kwargs):
+        """Синхронный вызов gspread с повтором при 429 «Quota exceeded»: 5, 10, 20, 40, 60 с."""
+        from gspread.exceptions import APIError
+
+        for attempt, delay in enumerate((*self.RETRY_DELAYS, None)):
+            try:
+                return fn(*args, **kwargs)
+            except APIError as e:
+                if getattr(e, "code", None) != 429 or delay is None:
+                    raise
+                log.warning("Google Sheets: превышена квота (429), повтор через %s с (попытка %s)", delay, attempt + 1)
+                self._sleep(delay)
+
     async def _run(self, fn, *args, **kwargs):
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        return await asyncio.to_thread(self.call, fn, *args, **kwargs)
 
     # ----- операции -----
 
@@ -475,24 +503,19 @@ class SheetsStorage(Storage):
             return list(await self._ensure_ops())
 
     async def add_operation(self, op: Operation) -> None:
-        async with self._lock:
-            ops = await self._ensure_ops()
-            await self._run(
-                self._ws(SHEET_OPERATIONS).append_row,
-                op_to_row(op), value_input_option="USER_ENTERED", table_range="A1",
-            )
-            ops.append(op)
+        await self.add_operations([op])
 
     async def add_operations(self, ops: list[Operation]) -> None:
+        """Одна запись в лист; кэш дополняется без перечитывания."""
         if not ops:
             return
         async with self._lock:
-            cached = await self._ensure_ops()
             await self._run(
                 self._ws(SHEET_OPERATIONS).append_rows,
                 [op_to_row(op) for op in ops], value_input_option="USER_ENTERED", table_range="A1",
             )
-            cached.extend(ops)
+            if self._ops is not None:
+                self._ops.extend(ops)
 
     async def delete_operations(self, op_ids: list[str]) -> int:
         if not op_ids:
@@ -534,19 +557,24 @@ class SheetsStorage(Storage):
         return None
 
     async def update_operation(self, op: Operation) -> bool:
+        return await self.update_operations([op]) == 1
+
+    async def update_operations(self, ops: list[Operation]) -> int:
+        """Одно чтение колонки id и одна пакетная запись; кэш правится без перечитывания листа."""
+        if not ops:
+            return 0
         async with self._lock:
-            row = await self._run(self._find_row, op.id)
-            if row is None:
-                return False
-            await self._run(
-                self._ws(SHEET_OPERATIONS).update, [op_to_row(op)], f"A{row}:J{row}",
-                value_input_option="USER_ENTERED",
-            )
-            ops = await self._ensure_ops()
-            for i, existing in enumerate(ops):
-                if existing.id == op.id:
-                    ops[i] = op
-            return True
+            ws = self._ws(SHEET_OPERATIONS)
+            ids = await self._run(ws.col_values, 9)
+            row_of = {v: i + 1 for i, v in enumerate(ids) if i > 0}
+            data = [{"range": f"A{row_of[op.id]}:J{row_of[op.id]}", "values": [op_to_row(op)]}
+                    for op in ops if op.id in row_of]
+            if data:
+                await self._run(ws.batch_update, data, value_input_option="USER_ENTERED")
+            if self._ops is not None:
+                updated = {op.id: op for op in ops if op.id in row_of}
+                self._ops = [updated.get(o.id, o) for o in self._ops]
+            return len(data)
 
     async def delete_operation(self, op_id: str) -> Operation | None:
         async with self._lock:
@@ -692,21 +720,33 @@ class SheetsStorage(Storage):
         return None, None
 
     async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
+        return await self.link_big_purchases([(item, op_id, category)]) == 1
+
+    async def link_big_purchases(self, links: list[tuple[BigPurchase, str, str]]) -> int:
+        """Вписать категорию и id операции в строки без id: одно чтение листа и одна пакетная запись."""
+        if not links:
+            return 0
         async with self._lock:
             lay = await self._run(self._big_layout)
             if lay is None:
-                return False
+                return 0
             formatted, raw = await self._run(self.read_grid, SHEET_BIG)
+            pending = list(links)
+            data = []
             for r in range(lay.header + 1, len(formatted)):
                 found = parse_big_purchases([formatted[lay.header], formatted[r]], [raw[lay.header], raw[r]])
-                if found and not found[0].op_id and (found[0].date, found[0].amount, found[0].what) == (item.date, item.amount, item.what):
-                    ws = self._ws(SHEET_BIG)
-                    await self._run(ws.update, [[text_for_sheet(category)]], f"{_col_letter(lay.cat_col)}{r + 1}",
-                                    value_input_option="USER_ENTERED")
-                    await self._run(ws.update, [[text_for_sheet(op_id)]], f"{_col_letter(lay.id_col)}{r + 1}",
-                                    value_input_option="USER_ENTERED")
-                    return True
-            return False
+                if not found or found[0].op_id:
+                    continue
+                key = (found[0].date, found[0].amount, found[0].what)
+                match = next((x for x in pending if (x[0].date, x[0].amount, x[0].what) == key), None)
+                if match is None:
+                    continue
+                pending.remove(match)
+                data.append({"range": f"{_col_letter(lay.cat_col)}{r + 1}", "values": [[text_for_sheet(match[2])]]})
+                data.append({"range": f"{_col_letter(lay.id_col)}{r + 1}", "values": [[text_for_sheet(match[1])]]})
+            if data:
+                await self._run(self._ws(SHEET_BIG).batch_update, data, value_input_option="USER_ENTERED")
+            return len(data) // 2
 
     async def read_sheet(self, title: str):
         try:

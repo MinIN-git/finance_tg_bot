@@ -62,6 +62,10 @@ class FakeWorksheet:
             target.extend([""] * (col + len(row) - len(target)))
             target[col:col + len(row)] = [user_entered(v) for v in row]
 
+    def batch_update(self, data, value_input_option=None):
+        for item in data:
+            self.update(item["values"], item["range"], value_input_option=value_input_option)
+
     def update_acell(self, label, value):
         col = ord(label[0]) - ord("A")
         row = self.rows[a1_row(label) - 1]
@@ -282,3 +286,56 @@ def test_link_big_purchase_and_read_sheet(monkeypatch):
     formatted, raw = run(s.read_sheet("Командировки"))
     assert formatted[1] == ["Кафешки", "100"] or formatted[1][0] == "Кафешки"
     assert run(s.read_sheet("Нет такого")) is None
+
+
+class _Resp:
+    def __init__(self, code):
+        self.code = code
+        self.text = "quota"
+
+    def json(self):
+        return {"error": {"code": self.code, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+
+
+def test_retry_on_429(storage):
+    from gspread.exceptions import APIError
+
+    slept, calls = [], {"n": 0}
+    storage._sleep = slept.append
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise APIError(_Resp(429))
+        return "ok"
+
+    assert storage.call(flaky) == "ok" and slept == [5, 10]
+
+    def always():
+        raise APIError(_Resp(429))
+
+    slept.clear()
+    with pytest.raises(APIError):
+        storage.call(always)
+    assert slept == [5, 10, 20, 40, 60]
+    with pytest.raises(APIError):     # другие ошибки — без повторов
+        storage.call(lambda: (_ for _ in ()).throw(APIError(_Resp(403))))
+
+
+def test_update_operations_batch_without_rereading(storage):
+    ops = [Operation(date(2026, 9, i + 1), OpType.EXPENSE, Decimal(i + 1), "Досуг", "Карта") for i in range(4)]
+    run(storage.add_operations(ops))
+    ws = storage._sh.sheets["Операции"]
+    reads = {"n": 0}
+    orig = ws.get_all_values
+
+    def counting(**kw):
+        reads["n"] += 1
+        return orig(**kw)
+
+    ws.get_all_values = counting
+    changed = [Operation(**{**o.__dict__, "amount": o.amount * 10}) for o in ops]
+    assert run(storage.update_operations(changed)) == 4
+    assert reads["n"] == 0                       # лист не перечитывался
+    storage._ops = None
+    assert [o.amount for o in run(storage.list_operations())] == [10, 20, 30, 40]

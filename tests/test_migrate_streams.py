@@ -144,3 +144,119 @@ def test_no_deduct_for_june_trip():
     assert all(r.import_op.date.month != 6 for r in plan.reductions)
     june = [o for o in plan.new_ops if o.date == date(2026, 6, 13)]
     assert sum(o.amount for o in june) == Decimal("33643.13")
+
+
+# ---------- обрыв посередине --apply и повторный запуск ----------
+
+class Crash(Exception):
+    pass
+
+
+class FlakyStorage(MemoryStorage):
+    """Падает на k-м пишущем вызове (как 429 посреди apply)."""
+
+    def __init__(self, crash_at, **kw):
+        super().__init__(**kw)
+        self.crash_at, self.calls = crash_at, 0
+
+    def _tick(self):
+        self.calls += 1
+        if self.calls == self.crash_at:
+            raise Crash
+
+    async def add_trip(self, trip):
+        self._tick()
+        await super().add_trip(trip)
+
+    async def add_operations(self, ops):
+        self._tick()
+        await super().add_operations(ops)
+
+    async def link_big_purchases(self, links):
+        self._tick()
+        return await super().link_big_purchases(links)
+
+    async def update_operations(self, ops):
+        self._tick()
+        return await super().update_operations(ops)
+
+
+def snapshot(st):
+    ops = run(st.list_operations())
+    return (
+        sorted((o.date, o.kind.value, o.category, o.amount, o.comment.split(" [")[0]) for o in ops),
+        sorted((b.what, b.category, bool(b.op_id)) for b in run(st.list_big_purchases())),
+        sorted(t.id for t in run(st.list_trips())),
+    )
+
+
+def flaky_storage(crash_at):
+    import copy
+    return FlakyStorage(crash_at, operations=history(), big_purchases=copy.deepcopy(BIGS),
+                        sheets={"Командировки": (TRIPS_FORMATTED, TRIPS_RAW)})
+
+
+def test_rerun_after_crash_at_any_step():
+    clean = storage()
+    run(ms.apply_plan(clean, run(ms.make_plan(clean, args()))))
+    expected = snapshot(clean)
+    total_calls = 2 + 3          # 2 поездки, операции, связи с листом, правки операций
+    for k in range(1, total_calls + 1):
+        st = flaky_storage(k)
+        try:
+            run(ms.apply_plan(st, run(ms.make_plan(st, args()))))
+        except Crash:
+            pass
+        st.crash_at = -1
+        rest = run(ms.make_plan(st, args()))
+        assert not any("тяжелая" in w for w in rest.warnings), k
+        run(ms.apply_plan(st, rest))
+        assert snapshot(st) == expected, f"обрыв на шаге {k}"
+        assert not ms.format_plan(run(ms.make_plan(st, args()))).count("+ "), k   # третьему запуску нечего делать
+
+
+def test_dry_run_after_partial_apply_shows_only_rest():
+    st = flaky_storage(4)        # поездки и операции записаны, связи с листом — нет
+    try:
+        run(ms.apply_plan(st, run(ms.make_plan(st, args()))))
+    except Crash:
+        pass
+    text = ms.format_plan(run(ms.make_plan(st, args())))
+    assert "Новые поездки" not in text and "Новые операции" not in text
+    assert "Вписать категорию и id" in text and "Уменьшить #импорт-операции" in text
+    assert "осталось связать строку листа" in text
+
+
+def test_full_migration_on_sheets_with_few_reads(monkeypatch):
+    import gspread
+    from tests.test_sheets_storage import FakeClient
+    from bot.storage import SheetsStorage, op_to_row
+
+    client = FakeClient()
+    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
+    s = SheetsStorage("key.json", "sheet-id", cache_ttl=3600)
+    s.ensure_sheets()
+    sh = client.sh.sheets
+    for op in history():
+        sh["Операции"].rows.append([c[1:] if isinstance(c, str) and c.startswith("'") else c for c in op_to_row(op)])
+    sh["Большие покупки"].rows += [[(b.date - date(1899, 12, 30)).days, b.what, int(b.amount)] for b in BIGS]
+    client.sh.add_worksheet("Командировки", 30, 5).rows = [list(r) for r in TRIPS_RAW]
+
+    reads = {"n": 0}
+    for ws in client.sh.sheets.values():
+        for name in ("get_all_values", "col_values", "row_values"):
+            orig = getattr(ws, name)
+
+            def counting(*a, _orig=orig, **kw):
+                reads["n"] += 1
+                return _orig(*a, **kw)
+            setattr(ws, name, counting)
+
+    plan = run(ms.make_plan(s, args()))
+    assert len(plan.new_ops) == 12 and len(plan.reductions) == 8 and not plan.warnings
+    run(ms.apply_plan(s, plan))
+    assert reads["n"] <= 15, reads["n"]                 # раньше — чтение «Операций» на каждую правку
+    assert [r[3] for r in sh["Большие покупки"].rows[1:]] == ["Семейные расходы", "Одежда / украшения", "Подарки", "Досуг"]
+    fresh = SheetsStorage("key.json", "sheet-id", cache_ttl=3600)
+    again = run(ms.make_plan(fresh, args()))
+    assert not (again.new_ops or again.reductions or again.new_trips or again.links)

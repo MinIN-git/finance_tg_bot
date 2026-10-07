@@ -46,7 +46,7 @@ def build_storage(config: Config) -> Storage:
             f"Не найден JSON-ключ service account: {config.credentials_file} (см. README, шаг 3)"
         )
     storage = SheetsStorage(config.credentials_file, config.spreadsheet_id, config.cache_ttl)
-    storage.ensure_sheets()
+    storage.call(storage.ensure_sheets)
     return storage
 
 

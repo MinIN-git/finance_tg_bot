@@ -214,9 +214,16 @@ def build_plan(
             plan.warnings.append(f"{what}: категория неизвестна — добавьте --heavy «{b.date:%d.%m.%Y}:{b.amount}=Категория»")
             continue
         if linked is None:
-            op = Operation(date=b.date, type=OpType.EXPENSE, amount=b.amount, category=category, account=account,
-                           comment=b.what, tags=[HEAVY_TAG], kind=Kind.HEAVY)
-            plan.new_ops.append(op)
+            # операция могла создаться в прошлом запуске, оборвавшемся до записи id в строку листа
+            existing = next((o for o in ops if o.type == OpType.EXPENSE and HEAVY_TAG in o.tags and o.date == b.date
+                             and abs(o.amount - b.amount) < TOLERANCE and o.comment == b.what), None)
+            if existing is not None:
+                op = existing
+                plan.done.append(f"{what}: тяжелая операция уже есть, осталось связать строку листа")
+            else:
+                op = Operation(date=b.date, type=OpType.EXPENSE, amount=b.amount, category=category, account=account,
+                               comment=b.what, tags=[HEAVY_TAG], kind=Kind.HEAVY)
+                plan.new_ops.append(op)
             plan.links.append((b, op))
         else:
             op = linked
@@ -291,20 +298,22 @@ def format_plan(plan: Plan) -> str:
 
 
 async def apply_plan(storage: Storage, plan: Plan) -> None:
+    """Порядок важен для повторного запуска после обрыва: сначала поездки и новые операции, потом связи
+    с листом и вычеты (каждая #импорт-операция обновляется одной записью вместе с меткой вычета)."""
     for trip in plan.new_trips:
         await storage.add_trip(trip)
     if plan.new_ops:
         await storage.add_operations(plan.new_ops)
-    for b, op in plan.links:
-        await storage.link_big_purchase(b, op.id, op.category)
+    if plan.links:
+        await storage.link_big_purchases([(b, op.id, op.category) for b, op in plan.links])
     reduced: dict[str, Operation] = {}
     for r in plan.reductions:
         imp = reduced.get(r.import_op.id, r.import_op)
         reduced[imp.id] = replace(imp, amount=imp.amount - r.amount, comment=f"{imp.comment} {r.marker}".strip())
-    for imp in reduced.values():
-        await storage.update_operation(imp)
-    for op in plan.kind_fixes:
-        await storage.update_operation(op)
+    updates = {op.id: op for op in plan.kind_fixes}
+    updates.update(reduced)            # у #импорт-операций вид не меняется, вычет важнее
+    if updates:
+        await storage.update_operations(list(updates.values()))
 
 
 # ---------- запуск ----------
@@ -337,8 +346,9 @@ async def run(args: argparse.Namespace) -> int:
     from .storage import SheetsStorage
 
     config = Config.from_env()
-    storage = SheetsStorage(config.credentials_file, config.spreadsheet_id, cache_ttl=0)
-    await asyncio.to_thread(storage.ensure_sheets)
+    # кэш на весь запуск: листы читаются один раз, запись — пакетами (квота Sheets — 60 чтений в минуту)
+    storage = SheetsStorage(config.credentials_file, config.spreadsheet_id, cache_ttl=3600)
+    await asyncio.to_thread(storage.call, storage.ensure_sheets)
     plan = await make_plan(storage, args)
     print(format_plan(plan))
     if not args.apply:
