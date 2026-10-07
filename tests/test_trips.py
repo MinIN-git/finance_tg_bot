@@ -52,18 +52,21 @@ def test_trip_flow():
     assert trip.city == "Казань" and not marked
     tickets = run(svc.toggle_trip(tickets.id, True))
     assert trip_tag(tickets) == "поездка-казань-131026" and "✈️ Казань" in svc.describe(tickets)
+    assert tickets.kind.value == "командировка"
     # трата в даты поездки помечается сама, кнопкой можно снять
     svc._today_fn = lambda: date(2026, 10, 14)      # уже в поездке
     hotel = run(svc.prepare("9000 отель")).op
     assert trip_tag(hotel)
     run(svc.save(hotel))
     assert run(svc.trip_for_button(hotel))[1] is True
-    assert trip_tag(run(svc.toggle_trip(hotel.id, False))) is None
+    assert hotel.kind.value == "командировка"
+    untagged = run(svc.toggle_trip(hotel.id, False))
+    assert trip_tag(untagged) is None and untagged.kind.value == "обычная"
     status = run(svc.trip_command(None))
     assert "идет сейчас" in status and "12" in status and "(2 трат)" in status
     assert "Такая поездка уже есть" in run(svc.trip_command("казань 13.10-16.10"))
     assert "отменена" in run(svc.trip_command("cancel"))
-    assert all(not trip_tag(o) for o in run(svc.storage.list_operations()))
+    assert all(not trip_tag(o) and o.kind.value == "обычная" for o in run(svc.storage.list_operations()))
     assert "Поездок впереди нет" in run(svc.trip_command(None))
 
 

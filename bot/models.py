@@ -14,6 +14,13 @@ class OpType(StrEnum):
     TRANSFER = "перевод"
 
 
+class Kind(StrEnum):
+    """Поток трат: в разбивке по категориям и в «обычно» участвуют только обычные."""
+    REGULAR = "обычная"
+    HEAVY = "тяжелая"
+    TRIP = "командировка"
+
+
 @dataclass
 class Operation:
     date: date
@@ -25,6 +32,14 @@ class Operation:
     comment: str = ""
     tags: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
+    kind: Kind = Kind.REGULAR
+
+    def __post_init__(self) -> None:
+        # Вид и теги согласованы: #тяжелое или тег поездки задают вид, если он не указан явно.
+        if self.type != OpType.EXPENSE:
+            self.kind = Kind.REGULAR
+        elif self.kind == Kind.REGULAR:
+            self.kind = kind_from_tags(self.tags)
 
 
 @dataclass
@@ -65,7 +80,24 @@ HEAVY_TAG_ALIASES = {"тяжелое", "тяжелая", "крупное", "кр
 
 
 def is_heavy(op: "Operation") -> bool:
-    return op.type == OpType.EXPENSE and HEAVY_TAG in op.tags
+    return op.type == OpType.EXPENSE and op.kind == Kind.HEAVY
+
+
+def is_trip(op: "Operation") -> bool:
+    return op.type == OpType.EXPENSE and op.kind == Kind.TRIP
+
+
+def is_regular(op: "Operation") -> bool:
+    return op.kind == Kind.REGULAR
+
+
+def kind_from_tags(tags: list[str]) -> Kind:
+    """Вид для строк без колонки «Вид» (записанных до ее появления): по тегам."""
+    if HEAVY_TAG in tags:
+        return Kind.HEAVY
+    if any(t.startswith(TRIP_TAG_PREFIX) for t in tags):
+        return Kind.TRIP
+    return Kind.REGULAR
 
 
 TRIP_TAG_PREFIX = "поездка-"

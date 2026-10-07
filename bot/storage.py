@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .categories import DEFAULT_CATEGORIES
-from .models import Account, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip
+from .models import Account, BalanceEntry, BigPurchase, Category, Kind, Operation, OpType, Trip, kind_from_tags
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ SHEET_BIG = "Большие покупки"
 SHEET_TRIPS = "Поездки"
 
 HEADERS = {
-    SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id"],
+    SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id", "Вид"],
     SHEET_ACCOUNTS: ["Название", "Вопрос для ежемесячного снимка"],
     SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
@@ -247,11 +247,12 @@ def op_to_row(op: Operation) -> list[Any]:
         text_for_sheet(op.comment),
         " ".join(f"#{t}" for t in op.tags),
         text_for_sheet(op.id),
+        op.kind.value,
     ]
 
 
 def row_to_op(row: list[Any]) -> Operation | None:
-    row = list(row) + [""] * (9 - len(row))
+    row = list(row) + [""] * (10 - len(row))
     d = cell_to_date(row[0])
     amount = cell_to_decimal(row[2])
     try:
@@ -261,10 +262,16 @@ def row_to_op(row: list[Any]) -> Operation | None:
     if d is None or amount is None:
         return None
     tags = [t.lstrip("#").lower() for t in str(row[7]).split() if t.strip("#")]
+    try:
+        kind = Kind(str(row[9]).strip().lower())
+    except ValueError:
+        kind = kind_from_tags(tags)
+    if op_type != OpType.EXPENSE:
+        kind = Kind.REGULAR
     return Operation(
         date=d, type=op_type, amount=abs(amount), category=str(row[3]).strip(),
         account=str(row[4]).strip(), to_account=str(row[5]).strip(), comment=str(row[6]).strip(),
-        tags=tags, id=str(row[8]).strip(),
+        tags=tags, id=str(row[8]).strip(), kind=kind,
     )
 
 
@@ -384,7 +391,21 @@ class SheetsStorage(Storage):
             ws.freeze(rows=1)
         if SHEET_CATEGORIES in existing:
             self._add_emoji_column()
+        if SHEET_OPERATIONS in existing:
+            self._add_kind_column()
         self.ensure_big_columns()
+
+    def _add_kind_column(self) -> None:
+        """Для «Операций» старой версии: дописать заголовок «Вид» в колонку J. Значения пустых
+        строк читаются по тегам, а при следующей записи строки заполняются."""
+        ws = self._ws(SHEET_OPERATIONS)
+        header = ws.row_values(1)
+        if len(header) >= 10 and str(header[9]).strip():
+            return
+        if ws.col_count < 10:
+            ws.add_cols(10 - ws.col_count)
+        log.info("Добавляю колонку «Вид» в лист «Операции»")
+        ws.update([["Вид"]], "J1", value_input_option="RAW")
 
     def _add_emoji_column(self) -> None:
         """Для листа «Категории», созданного старой версией: дописать колонку «Эмодзи» с эмодзи
@@ -498,7 +519,7 @@ class SheetsStorage(Storage):
             if row is None:
                 return False
             await self._run(
-                self._ws(SHEET_OPERATIONS).update, [op_to_row(op)], f"A{row}:I{row}",
+                self._ws(SHEET_OPERATIONS).update, [op_to_row(op)], f"A{row}:J{row}",
                 value_input_option="USER_ENTERED",
             )
             ops = await self._ensure_ops()

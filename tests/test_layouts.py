@@ -105,13 +105,12 @@ def test_month_close_heavy_view():
     assert f"За 12 месяцев: 1 трат на 283{NB}тыс" in text
 
 
-def test_month_close_heavy_old_row_without_category():
+def test_sheet_rows_do_not_change_sums():
+    """Строки «Больших покупок» — только зеркало: в расчетах участвует «Вид» операций."""
     ops = history()[:-2] + [op(date(2026, 9, 12), E, 283122, "Досуг"), op(date(2026, 9, 13), E, 5000, "Досуг")]
     bigs = [BigPurchase(date(2026, 9, 12), "Отпуск в Турцию", Decimal(283122))]
-    s = svc(ops=ops, bigs=bigs)
-    assert f"💸 Расход <b>121{NB}тыс</b>" in run(s.month_close_text())    # вычтено из общего расхода
-    heavy = run(s.month_close_text(view="heavy"))
-    assert "❔ Отпуск в Турцию" in heavy and "Впишите категорию" in heavy
+    text = run(svc(ops=ops, bigs=bigs).month_close_text())
+    assert f"💸 Расход <b>404{NB}тыс</b>" in text and "Тяжелые траты" not in text
 
 
 def test_month_close_all_categories_and_no_snapshot():

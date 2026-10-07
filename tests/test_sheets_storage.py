@@ -68,6 +68,9 @@ class FakeWorksheet:
         row.extend([""] * (col + 1 - len(row)))
         row[col] = user_entered(value)
 
+    def row_values(self, row):
+        return [str(v) for v in self.rows[row - 1]] if len(self.rows) >= row else []
+
     def col_values(self, col):
         return [str(r[col - 1]) if len(r) >= col else "" for r in self.rows]
 
@@ -125,7 +128,7 @@ def run(coro):
 def test_ensure_sheets_creates_and_seeds(storage):
     sheets = storage._sh.sheets
     assert set(sheets) == {"Лист1", "Операции", "Счета", "Категории", "Остатки", "Большие покупки", "Поездки"}
-    assert sheets["Операции"].rows[0][-1] == "id"
+    assert sheets["Операции"].rows[0][-2:] == ["id", "Вид"]
     accounts = run(storage.list_accounts())
     assert [(a.name, a.prompt) for a in accounts][0] == ("Карта", "Сколько на карте?")
     cats = run(storage.list_categories())
@@ -241,3 +244,22 @@ def test_old_big_sheet_gets_category_column(monkeypatch):
     old.rows[2] += ["Досуг"]                          # Иван вписал категорию
     [b] = run(s.list_big_purchases())
     assert (b.what, b.category, b.amount) == ("Отпуск в Турцию", "Досуг", 283122)
+
+
+def test_old_operations_sheet_gets_kind_column(monkeypatch):
+    import gspread
+
+    client = FakeClient()
+    old = client.sh.add_worksheet("Операции", 1000, 9)
+    old.rows = [["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id"],
+                ["2026-09-06", "расход", 283122, "Досуг", "Карта", "", "отпуск", "#тяжелое", "a1"],
+                ["2026-09-07", "расход", 500, "Досуг", "Карта", "", "кино", "", "a2"]]
+    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
+    s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
+    s.ensure_sheets()
+    assert old.rows[0][9] == "Вид"
+    ops = run(s.list_operations())
+    assert [o.kind.value for o in ops] == ["тяжелая", "обычная"]      # без «Вида» — по тегам
+    ops[1].kind = st.Kind.TRIP
+    run(s.update_operation(ops[1]))
+    assert old.rows[2][9] == "командировка"

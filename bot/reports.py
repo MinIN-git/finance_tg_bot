@@ -2,7 +2,7 @@
 
 Правила оформления: суммы без копеек (в итогах — «тыс»), никаких процентов сбережений,
 отметки «выше/ниже обычного» и стрелки — только при отклонении больше 30%,
-«обычно» — среднее за 3 прошлых полных месяца без тяжелых трат.
+«обычно» — среднее за 3 прошлых полных месяца только по обычным тратам (без тяжелых и командировок).
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterable, Mapping, Sequence
 
-from .models import BalanceEntry, BigPurchase, Operation, OpType, is_heavy
+from .models import BalanceEntry, BigPurchase, Operation, OpType, is_heavy, is_regular, is_trip
 from .textutil import (
     MONTHS_GENITIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_date, fmt_k, fmt_money, fmt_percent, fmt_short_date,
     month_title,
@@ -122,35 +122,27 @@ def summarize_month(ops: Sequence[Operation], any_day: date) -> Summary:
 
 # ---------- тяжелые траты ----------
 
-def heavy_items(ops: Sequence[Operation], bigs: Sequence[BigPurchase], start: date, end: date) -> list[BigPurchase]:
-    """Тяжелые траты периода: строки «Больших покупок» + операции с #тяжелое, которых в листе нет."""
-    items = [b for b in bigs if start <= b.date <= end]
-    known = {b.op_id for b in bigs if b.op_id}
-    items += [
+def heavy_items(ops: Sequence[Operation], start: date, end: date) -> list[BigPurchase]:
+    """Тяжелые траты периода — операции вида «тяжелая» (лист «Большие покупки» — их зеркало)."""
+    items = [
         BigPurchase(op.date, op.comment or op.category, op.amount, op.category, op.id)
-        for op in ops if is_heavy(op) and start <= op.date <= end and op.id not in known
+        for op in ops if is_heavy(op) and start <= op.date <= end
     ]
     return sorted(items, key=lambda b: (b.date, b.what))
 
 
-def summarize_clean(ops: Sequence[Operation], bigs: Sequence[BigPurchase], start: date, end: date) -> Summary:
-    """Сводка без тяжелых трат. Операции с #тяжелое просто не учитываются; старые строки листа
-    (без операции) вычитаются из своей категории, а если категория не указана — только из общего расхода."""
-    s = summarize([op for op in ops if not is_heavy(op)], start, end)
-    heavy_ids = {op.id for op in ops if is_heavy(op)}
-    cats = dict(s.expense_by_category)
-    for b in bigs:
-        if not (start <= b.date <= end) or (b.op_id and b.op_id in heavy_ids):
-            continue
-        s.expense = max(s.expense - b.amount, ZERO)
-        if b.category in cats:
-            cats[b.category] = cats[b.category] - b.amount
-    s.expense_by_category = _sorted_totals({k: v for k, v in cats.items() if v > 0})
-    return s
+def trip_spending(ops: Sequence[Operation], start: date, end: date) -> Decimal:
+    return sum((op.amount for op in ops if is_trip(op) and start <= op.date <= end), ZERO)
 
 
-def summarize_clean_month(ops: Sequence[Operation], bigs: Sequence[BigPurchase], any_day: date) -> Summary:
-    return summarize_clean(ops, bigs, month_start(any_day), month_end(any_day))
+def summarize_clean(ops: Sequence[Operation], start: date, end: date) -> Summary:
+    """Сводка только по обычным тратам: тяжелые и командировки — отдельные потоки,
+    в разбивку по категориям и в «обычно» они не входят. Доходы — все."""
+    return summarize([op for op in ops if is_regular(op) or op.type != OpType.EXPENSE], start, end)
+
+
+def summarize_clean_month(ops: Sequence[Operation], any_day: date) -> Summary:
+    return summarize_clean(ops, month_start(any_day), month_end(any_day))
 
 
 @dataclass
@@ -162,9 +154,9 @@ class Usual:
     by_category: dict[str, Decimal]
 
 
-def usual(ops: Sequence[Operation], bigs: Sequence[BigPurchase], month: date, window: int = 3) -> Usual:
+def usual(ops: Sequence[Operation], month: date, window: int = 3) -> Usual:
     first = month_start(month)
-    prev = [summarize_clean_month(ops, bigs, add_months(first, -i)) for i in range(1, window + 1)]
+    prev = [summarize_clean_month(ops, add_months(first, -i)) for i in range(1, window + 1)]
     prev = [p for p in prev if p.count]
     if not prev:
         return Usual([], None, None, {})
@@ -371,9 +363,9 @@ def _on_date(d: date) -> str:
     return f"{d.day} {MONTHS_GENITIVE[d.month - 1]}"
 
 
-def safety_months(total: Decimal, ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date) -> Decimal | None:
+def safety_months(total: Decimal, ops: Sequence[Operation], today: date) -> Decimal | None:
     """Сколько месяцев обычных трат (без тяжелых) покрывает капитал."""
-    u = usual(ops, bigs, today)
+    u = usual(ops, today)
     return total / u.expense if u.expense else None
 
 
@@ -446,7 +438,6 @@ class MonthClose:
 
 def month_close(
     ops: Sequence[Operation],
-    bigs: Sequence[BigPurchase],
     balances: Sequence[BalanceEntry],
     month: date,
     account_order: Sequence[str] = (),
@@ -458,10 +449,10 @@ def month_close(
         capital = None   # свежего снимка на начало следующего месяца нет
     return MonthClose(
         month=first,
-        clean=summarize_clean(ops, bigs, first, last),
+        clean=summarize_clean(ops, first, last),
         full=summarize(ops, first, last),
-        usual=usual(ops, bigs, first),
-        heavy=heavy_items(ops, bigs, first, last),
+        usual=usual(ops, first),
+        heavy=heavy_items(ops, first, last),
         capital=capital,
     )
 
@@ -536,17 +527,17 @@ NO_CATEGORY_HINT = (
 )
 
 
-def heavy_year(ops: Sequence[Operation], bigs: Sequence[BigPurchase], last: date) -> tuple[int, Decimal, Decimal]:
+def heavy_year(ops: Sequence[Operation], last: date) -> tuple[int, Decimal, Decimal]:
     """За 12 месяцев до конца `last`: (число тяжелых трат, их сумма, доля в расходах, %)."""
     start = add_months(month_start(last), -11)
-    items = heavy_items(ops, bigs, start, last)
+    items = heavy_items(ops, start, last)
     total = sum((b.amount for b in items), ZERO)
     expense = summarize(ops, start, last).expense
     return len(items), total, (total / expense * 100 if expense > 0 else ZERO)
 
 
 def format_month_heavy(
-    mc: MonthClose, ops: Sequence[Operation], bigs: Sequence[BigPurchase], cur: str = "", icons: Icons | None = None,
+    mc: MonthClose, ops: Sequence[Operation], cur: str = "", icons: Icons | None = None,
 ) -> str:
     title = f"🧾 <b>Тяжелые траты</b> · {MONTHS_NOMINATIVE[mc.month.month - 1]}"
     if not mc.heavy:
@@ -568,7 +559,7 @@ def format_month_heavy(
             )
         if any(not b.category for b in mc.heavy):
             lines += ["", NO_CATEGORY_HINT]
-    n, total, share = heavy_year(ops, bigs, month_end(mc.month))
+    n, total, share = heavy_year(ops, month_end(mc.month))
     if n:
         lines += ["", f"За 12 месяцев: {n} трат на {fmt_k(total, cur)} · {fmt_percent(share)} всех расходов"]
     return "\n".join(lines)
@@ -620,11 +611,11 @@ class Stats:
         return {n: [dict(s.expense_by_category).get(n, ZERO) for s in self.monthly] for n in names}
 
 
-def stats(ops: Sequence[Operation], bigs: Sequence[BigPurchase], balances: Sequence[BalanceEntry], today: date, n: int = 3) -> Stats:
+def stats(ops: Sequence[Operation], balances: Sequence[BalanceEntry], today: date, n: int = 3) -> Stats:
     """n полных месяцев перед текущим."""
     first = add_months(month_start(today), -n)
     months = [add_months(first, i) for i in range(n)]
-    monthly = [summarize_clean_month(ops, bigs, m) for m in months]
+    monthly = [summarize_clean_month(ops, m) for m in months]
     with_data = [s for s in monthly if s.count]
     rising, falling = [], []
     if len(with_data) >= 2:
@@ -649,7 +640,7 @@ def stats(ops: Sequence[Operation], bigs: Sequence[BigPurchase], balances: Seque
         capital_before=capital_at_month_end(balances, add_months(first, -1)),
         rising=rising[:LIST_LIMIT],
         falling=falling[:LIST_LIMIT],
-        heavy=heavy_items(ops, bigs, first, month_end(months[-1])),
+        heavy=heavy_items(ops, first, month_end(months[-1])),
     )
 
 
@@ -695,7 +686,6 @@ def format_stats_heavy(st: Stats, cur: str = "", icons: Icons | None = None) -> 
 def format_category_report(
     name: str,
     ops: Sequence[Operation],
-    bigs: Sequence[BigPurchase],
     today: date,
     cur: str = "",
     max_items: int = 20,
@@ -716,10 +706,10 @@ def format_category_report(
     hist = []
     for i in range(1, 4):
         m = add_months(first, -i)
-        amount = dict(summarize_clean_month(ops, bigs, m).expense_by_category).get(name, ZERO)
+        amount = dict(summarize_clean_month(ops, m).expense_by_category).get(name, ZERO)
         hist.append(f"{MONTHS_SHORT[m.month - 1]} {m.year}: {fmt_money(amount, cur)}")
     lines += ["", "<b>Прошлые месяцы</b> (без тяжелых):", *hist]
-    avg = usual(ops, bigs, first).by_category.get(name)
+    avg = usual(ops, first).by_category.get(name)
     if avg:
         lines.append(f"Обычно: <b>{fmt_money(avg, cur)}</b> в месяц")
     return "\n".join(lines)
@@ -728,9 +718,9 @@ def format_category_report(
 # ---------- сравнение двух месяцев (/compare) ----------
 
 def format_compare(
-    ops: Sequence[Operation], bigs: Sequence[BigPurchase], m1: date, m2: date, cur: str = "", icons: Icons | None = None,
+    ops: Sequence[Operation], m1: date, m2: date, cur: str = "", icons: Icons | None = None,
 ) -> str:
-    a, b = summarize_clean_month(ops, bigs, m1), summarize_clean_month(ops, bigs, m2)
+    a, b = summarize_clean_month(ops, m1), summarize_clean_month(ops, m2)
 
     def row(label: str, x: Decimal, y: Decimal, signed: bool = False) -> str:
         return (f"{label} {fmt_k(x, signed=signed)} → <b>{fmt_k(y, cur, signed=signed)}</b>  "
@@ -762,12 +752,12 @@ def format_compare(
 # ---------- тяжелые траты за год (/big) ----------
 
 def format_big(
-    ops: Sequence[Operation], bigs: Sequence[BigPurchase], today: date, cur: str = "", icons: Icons | None = None,
+    ops: Sequence[Operation], today: date, cur: str = "", icons: Icons | None = None,
     limit: int = 30,
 ) -> str:
     start = add_months(month_start(today), -11)
-    items = sorted(heavy_items(ops, bigs, start, today), key=lambda b: b.date, reverse=True)
-    n, total, share = heavy_year(ops, bigs, today)
+    items = sorted(heavy_items(ops, start, today), key=lambda b: b.date, reverse=True)
+    n, total, share = heavy_year(ops, today)
     head = f"🧾 <b>Тяжелые траты</b> с {MONTHS_SHORT[start.month - 1]} {start.year}"
     if not items:
         return f"{head}\nПока нет. Пометьте трату тегом: <code>283000 отпуск #тяжелое</code>"
@@ -789,7 +779,6 @@ OTHER_FROM_DAY = 10
 
 def find_signals(
     ops: Sequence[Operation],
-    bigs: Sequence[BigPurchase],
     balances: Sequence[BalanceEntry],
     today: date,
     cur: str = "",
@@ -799,10 +788,10 @@ def find_signals(
     out: list[tuple[str, str]] = []
     first = month_start(today)
     key_month = first.strftime("%Y-%m")
-    s = summarize_clean(ops, bigs, first, today)
+    s = summarize_clean(ops, first, today)
 
     if today.day >= SIGNAL_CATEGORY_FROM_DAY:
-        avgs = usual(ops, bigs, today).by_category
+        avgs = usual(ops, today).by_category
         for name, amount in s.expense_by_category:
             avg = avgs.get(name)
             if avg and amount > avg:

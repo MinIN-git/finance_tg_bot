@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from . import reports
 from .categories import find_category, guess_category, learnable_keyword
 from .models import (
-    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_TAG_PREFIX, Account, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip, is_heavy,
+    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_TAG_PREFIX, Account, Kind, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip, is_heavy,
     trip_tag,
 )
 from . import trips as trips_mod
@@ -113,8 +113,9 @@ class FinanceService:
         if op.type == OpType.TRANSFER:
             return Prepared(op, needs_category=False)
         trip = trips_mod.covering(await self._trips(), op.date)
-        if trip is not None and op.type == OpType.EXPENSE and trip.tag not in op.tags:
+        if trip is not None and op.type == OpType.EXPENSE and trip.tag not in op.tags and not is_heavy(op):
             op.tags.append(trip.tag)          # трата в даты поездки — сразу командировочная
+            op.kind = Kind.TRIP
         categories = await self._categories()
         if parsed.explicit_sign:
             op.category = guess_category(op.comment, op.type, categories) or ""
@@ -240,15 +241,15 @@ class FinanceService:
 
     # ---------- отчеты ----------
 
-    async def _data(self):
-        """Операции, тяжелые траты и иконки категорий — то, что нужно почти каждому отчету."""
+    async def _data(self) -> list[Operation]:
+        """Операции (и заодно иконки категорий) — то, что нужно почти каждому отчету."""
         await self._categories()
-        return await self.storage.list_operations(), await self.storage.list_big_purchases()
+        return await self.storage.list_operations()
 
     async def month_text(self, view: str = "main") -> str:
         """Текущий месяц: "main" — сводка, "all" — все категории, "last" — последние траты."""
         today = self.today()
-        ops, bigs = await self._data()
+        ops = await self._data()
         first = reports.month_start(today)
         s = reports.summarize(ops, first, today)
         if view == "all":
@@ -258,15 +259,15 @@ class FinanceService:
             lines = [f"🕑 {reports.month_now_title(today)}: последние траты"]
             lines += [self.describe_short(op) for op in reversed(recent)] or ["Трат пока нет."]
             return "\n".join(lines)
-        heavy = sum((b.amount for b in reports.heavy_items(ops, bigs, first, today)), Decimal(0))
+        heavy = sum((b.amount for b in reports.heavy_items(ops, first, today)), Decimal(0))
         return reports.format_now(reports.month_now_title(today), s, heavy, self.cur, self._icons)
 
     async def week_text(self) -> str:
         today = self.today()
-        ops, bigs = await self._data()
+        ops = await self._data()
         start = reports.week_start(today)
         s = reports.summarize(ops, start, today)
-        heavy = sum((b.amount for b in reports.heavy_items(ops, bigs, start, today)), Decimal(0))
+        heavy = sum((b.amount for b in reports.heavy_items(ops, start, today)), Decimal(0))
         return reports.format_now(reports.week_title(start, today), s, heavy, self.cur, self._icons)
 
     async def category_text(self, query: str) -> str:
@@ -276,22 +277,22 @@ class FinanceService:
             return f"Категория «{html.escape(query)}» не найдена. Список: /categories"
         if len(names) > 1:
             return "Уточните категорию: " + ", ".join(html.escape(n) for n in names)
-        ops, bigs = await self._data()
+        ops = await self._data()
         icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
-        return reports.format_category_report(names[0], ops, bigs, self.today(), self.cur, icon=icon)
+        return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
 
     async def month_close(self, month: date | None = None) -> reports.MonthClose:
         month = reports.month_start(month or reports.add_months(self.today(), -1))
-        ops, bigs = await self._data()
+        ops = await self._data()
         accounts = [a.name for a in await self.storage.list_accounts()]
-        return reports.month_close(ops, bigs, await self.storage.list_balances(), month, accounts)
+        return reports.month_close(ops, await self.storage.list_balances(), month, accounts)
 
     async def month_close_text(self, month: date | None = None, view: str = "main") -> str:
         """Итоги месяца (по умолчанию прошлого): "main", "heavy" — тяжелые траты, "all" — все категории."""
         mc = await self.month_close(month)
         if view == "heavy":
-            ops, bigs = await self._data()
-            return reports.format_month_heavy(mc, ops, bigs, self.cur, self._icons)
+            ops = await self._data()
+            return reports.format_month_heavy(mc, ops, self.cur, self._icons)
         if view == "all":
             return reports.format_month_categories(mc, self.cur, self._icons)
         return reports.format_month_close(mc, self.cur, self._icons)
@@ -299,8 +300,8 @@ class FinanceService:
     monthly_report_text = month_close_text
 
     async def stats(self, n: int = 3) -> reports.Stats:
-        ops, bigs = await self._data()
-        return reports.stats(ops, bigs, await self.storage.list_balances(), self.today(), n)
+        ops = await self._data()
+        return reports.stats(ops, await self.storage.list_balances(), self.today(), n)
 
     async def stats_report(self, n: int = 3) -> tuple[str, bytes | None]:
         """Текст /stats и картинка с графиками."""
@@ -322,8 +323,8 @@ class FinanceService:
         return reports.format_stats_heavy(await self.stats(n), self.cur, self._icons)
 
     async def signals(self) -> list[tuple[str, str]]:
-        ops, bigs = await self._data()
-        return reports.find_signals(ops, bigs, await self.storage.list_balances(), self.today(), self.cur, self._icons)
+        ops = await self._data()
+        return reports.find_signals(ops, await self.storage.list_balances(), self.today(), self.cur, self._icons)
 
     async def compare_text(self, args: str | None) -> str:
         from .import_budget import parse_month_label
@@ -344,12 +345,12 @@ class FinanceService:
                 return ("Укажите два месяца: <code>/compare август сентябрь</code> "
                         "или <code>/compare 08.2026 09.2026</code>")
             m1, m2 = months
-        ops, bigs = await self._data()
-        return reports.format_compare(ops, bigs, m1, m2, self.cur, self._icons)
+        ops = await self._data()
+        return reports.format_compare(ops, m1, m2, self.cur, self._icons)
 
     async def big_text(self) -> str:
-        ops, bigs = await self._data()
-        return reports.format_big(ops, bigs, self.today(), self.cur, self._icons)
+        ops = await self._data()
+        return reports.format_big(ops, self.today(), self.cur, self._icons)
 
     async def categories_text(self) -> str:
         cats = await self._categories()
@@ -392,7 +393,8 @@ class FinanceService:
             if trip is None:
                 return None
             tags.append(trip.tag)
-        op = replace(current, tags=tags)
+        kind = Kind.HEAVY if is_heavy(current) else (Kind.TRIP if on else Kind.REGULAR)
+        op = replace(current, tags=tags, kind=kind)
         return op if await self.storage.update_operation(op) else None
 
     async def trip_command(self, args: str | None) -> str:
@@ -410,7 +412,10 @@ class FinanceService:
                 return (f"Поездка в {html.escape(trip.city)} закончится сама {trip.end:%d.%m}. "
                         "Чтобы удалить ее совсем: /trip cancel")
             for op in trips_mod.trip_ops(trip, ops):
-                await self.storage.update_operation(replace(op, tags=[t for t in op.tags if t != trip.tag]))
+                await self.storage.update_operation(replace(
+                    op, tags=[t for t in op.tags if t != trip.tag],
+                    kind=Kind.HEAVY if is_heavy(op) else Kind.REGULAR,
+                ))
             await self.storage.delete_trip(trip.id)
             return f"✖️ Поездка {html.escape(trip.city)} {trips_mod.fmt_range(trip)} отменена, пометки с трат сняты."
         try:
@@ -423,8 +428,8 @@ class FinanceService:
         await self.storage.add_trip(trip)
         tagged = 0
         for op in ops:
-            if op.type == OpType.EXPENSE and trip.covers(op.date) and not trip_tag(op):
-                await self.storage.update_operation(replace(op, tags=[*op.tags, trip.tag]))
+            if op.type == OpType.EXPENSE and trip.covers(op.date) and not trip_tag(op) and not is_heavy(op):
+                await self.storage.update_operation(replace(op, tags=[*op.tags, trip.tag], kind=Kind.TRIP))
                 tagged += 1
         await self._trips()
         text = f"✈️ Поездка: <b>{html.escape(city)}</b>, {trips_mod.fmt_range(trip)} · {trip.days} дн."
@@ -491,7 +496,7 @@ class FinanceService:
         summary = reports.capital_summary(balances, ops, accounts)
         safety = None
         if summary is not None:
-            safety = reports.safety_months(summary.total, ops, await self.storage.list_big_purchases(), self.today())
+            safety = reports.safety_months(summary.total, ops, self.today())
         return reports.format_capital(summary, self.cur, reports.snapshot_totals(balances), safety)
 
 
