@@ -27,9 +27,10 @@ def september():
     ops = [op(date(2026, 9, 1), I, 491386, "Зарплата")]
     ops += [op(date(2026, 9, 10), E, a, c) for c, a in SEPT_REGULAR.items()]
     ops.append(op(date(2026, 9, 6), E, 283122, "Досуг", ["тяжелое"], "Отпуск в Турцию"))
-    ops += [op(date(2026, 9, 6), E, 14897, "Еда вне дома", [TRIP.tag], "Кафешки"),
-            op(date(2026, 9, 6), E, 7098, "Транспорт/РЖД", [TRIP.tag], "ЖД"),
-            op(date(2026, 9, 6), E, 20000, "Прочее", [TRIP.tag], "Жилье")]
+    ops += [op(date(2026, 9, 6), E, 14897, "Еда вне дома", [TRIP.tag], "Кафешки [командировка-060926 Кафешки]"),
+            op(date(2026, 9, 6), E, 926, "Транспорт/РЖД", [TRIP.tag], "Транспорт [командировка-060926 Транспорт]"),
+            op(date(2026, 9, 6), E, 6172, "Транспорт/РЖД", [TRIP.tag], "ЖД билеты [командировка-060926 ЖД билеты]"),
+            op(date(2026, 9, 6), E, 20000, "Прочее", [TRIP.tag], "Жилье [командировка-060926 Жилье]")]
     return ops
 
 
@@ -75,7 +76,22 @@ def test_report_heavy_and_trips_views():
     assert f"06.09 🎭 Отпуск в Турцию — 283{NB}122" in heavy and f"Всего: <b>283{NB}122</b>" in heavy
     trips, _, _ = run(svc(september()).month_close_view(view="trips"))
     assert f"<b>Командировка 6–11.09</b> — 41{NB}995" in trips
-    assert f"🍽 Еда вне дома 14{NB}897" in trips and f"📌 Прочее 20{NB}000" in trips
+    lines = trips.split("<b>Командировка 6–11.09</b>")[1].splitlines()[1:]
+    assert lines == [f"   🏨 Жилье 20{NB}000", f"   🍽 Кафешки 14{NB}897", f"   🚆 Билеты 6{NB}172",
+                     f"   🚕 Транспорт 926"]
+    assert "Прочее" not in trips                       # статьи поездки, а не категории
+
+
+def test_trip_view_bot_entered_ops_by_items():
+    ops = [op(date(2026, 9, 7), E, 900, "Еда вне дома", [TRIP.tag], "обед"),
+           op(date(2026, 9, 7), E, 5000, "Досуг", [TRIP.tag], "отель"),
+           op(date(2026, 9, 8), E, 3000, "Транспорт/РЖД", [TRIP.tag], "билеты ржд"),
+           op(date(2026, 9, 8), E, 400, "Транспорт/РЖД", [TRIP.tag], "такси"),
+           op(date(2026, 9, 9), E, 300, "Подарки", [TRIP.tag], "сувенир")]
+    text, _, _ = run(svc(ops).month_close_view(view="trips"))
+    lines = text.split("</b> — ")[1].splitlines()[1:]
+    assert lines == [f"   🏨 Жилье 5{NB}000", f"   🚆 Билеты 3{NB}000", "   🍽 Кафешки 900",
+                     "   🚕 Транспорт 400", "   📌 Прочее 300"]
 
 
 def test_report_buttons_only_when_needed():

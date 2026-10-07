@@ -80,8 +80,9 @@ def test_format_trips_usual_and_last():
            Operation(date(2026, 9, 14), E, Decimal(33643), "Еда вне дома", tags=[t3.tag])]
     text = trips.format_trips([t1, t2, t3, t4], ops, TODAY)
     lines = text.splitlines()
-    assert lines[1] == "Сочи 1–3.11 · 3 дн · 0 · впереди"
-    assert lines[2] == "Казань 13–16.09 · 4 дн · 33 643"
+    assert lines[1] == "<b>Сочи</b> 1–3.11 · 3 дн · 0 · впереди"
+    assert lines[2] == "<b>Казань</b> 13–16.09 · 4 дн · 33 643"
+    assert lines[3] == "   🍽 Кафешки 33 643"
     assert "Обычно поездка 19 548, в день 6 516" in text
     assert "Последняя (Казань): в день 8 411 — ⬆️ +68% к обычной" in text
     assert "Командировок пока нет" in trips.format_trips([], [], TODAY)
@@ -97,4 +98,45 @@ def test_trip_buttons_in_chat():
     assert "✈️ В Казань" in kb
     out = h.click(kb["✈️ В Казань"])
     assert "✈️ Казань" in texts(out)[0] and "✖️ Не командировка" in buttons(out)
-    assert "Казань 13–16.10" in texts(h.text("/командировки"))[0]
+    trips_text = texts(h.text("/командировки"))[0]
+    assert "<b>Казань</b> 13–16.10" in trips_text and "🚆 Билеты 12" in trips_text
+    # статью можно сменить кнопкой
+    kb = buttons(h.text("13000 билеты ржд"))
+    out = h.click(kb["✈️ В Казань"])
+    kb = buttons(out)
+    assert "🧳 Статья: Билеты" in kb
+    out = h.click(kb["🧳 Статья: Билеты"])
+    out = h.click(buttons(out)["🏨 Жилье"])
+    assert "🏨 Жилье" in texts(out)[0]
+
+
+
+@pytest.mark.parametrize("comment,category,expected", [
+    ("отель Казань", "Досуг", "Жилье"),
+    ("посуточно квартира", "Прочее", "Жилье"),
+    ("билеты ржд", "Транспорт/РЖД", "Билеты"),
+    ("самолет", "Транспорт/РЖД", "Билеты"),
+    ("такси до вокзала", "Транспорт/РЖД", "Транспорт"),
+    ("обед", "Еда вне дома", "Кафешки"),
+    ("сувенир", "Подарки", "Прочее"),
+    ("метро", "Прочее", "Транспорт"),
+    ("ЖД билеты [командировка-130726 ЖД билеты]", "Транспорт/РЖД", "Билеты"),
+    ("Жилье [командировка-060926 Жилье]", "Прочее", "Жилье"),
+])
+def test_guess_trip_item(comment, category, expected):
+    from bot.models import guess_trip_item
+    assert guess_trip_item(comment, category) == expected
+
+
+def test_trip_item_on_input_and_kind_changes():
+    svc = FinanceService(MemoryStorage(), today_fn=lambda: date(2026, 10, 14))
+    run(svc.trip_command("Казань 13.10–16.10"))
+    hotel = run(svc.prepare("9000 отель"))
+    assert hotel.op.trip_item == "Жилье" and "🏨 Жилье" in svc.describe(hotel.op)
+    run(svc.save(hotel.op))
+    changed = run(svc.set_trip_item(hotel.op.id, "Прочее"))
+    assert changed.trip_item == "Прочее"
+    regular = run(svc.toggle_trip(hotel.op.id, False))
+    assert regular.trip_item == "" and regular.kind.value == "обычная"
+    back = run(svc.toggle_trip(hotel.op.id, True))
+    assert back.trip_item == "Жилье"                   # заново по словам

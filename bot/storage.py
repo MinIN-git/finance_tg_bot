@@ -31,7 +31,8 @@ SHEET_BIG = "Большие покупки"
 SHEET_TRIPS = "Поездки"
 
 HEADERS = {
-    SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id", "Вид"],
+    SHEET_OPERATIONS: ["Дата", "Тип", "Сумма", "Категория", "Счет", "Счет-получатель", "Комментарий", "Теги", "id", "Вид",
+                       "Статья поездки"],
     SHEET_ACCOUNTS: ["Название", "Вопрос для ежемесячного снимка"],
     SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
@@ -280,11 +281,12 @@ def op_to_row(op: Operation) -> list[Any]:
         " ".join(f"#{t}" for t in op.tags),
         text_for_sheet(op.id),
         op.kind.value,
+        op.trip_item,
     ]
 
 
 def row_to_op(row: list[Any]) -> Operation | None:
-    row = list(row) + [""] * (10 - len(row))
+    row = list(row) + [""] * (11 - len(row))
     d = cell_to_date(row[0])
     amount = cell_to_decimal(row[2])
     try:
@@ -303,7 +305,7 @@ def row_to_op(row: list[Any]) -> Operation | None:
     return Operation(
         date=d, type=op_type, amount=abs(amount), category=str(row[3]).strip(),
         account=str(row[4]).strip(), to_account=str(row[5]).strip(), comment=str(row[6]).strip(),
-        tags=tags, id=str(row[8]).strip(), kind=kind,
+        tags=tags, id=str(row[8]).strip(), kind=kind, trip_item=str(row[10]).strip(),
     )
 
 
@@ -432,16 +434,17 @@ class SheetsStorage(Storage):
         self.ensure_big_columns()
 
     def _add_kind_column(self) -> None:
-        """Для «Операций» старой версии: дописать заголовок «Вид» в колонку J. Значения пустых
-        строк читаются по тегам, а при следующей записи строки заполняются."""
+        """Для «Операций» старой версии: дописать заголовки «Вид» (J) и «Статья поездки» (K). Пустые значения
+        читаются по тегам и меткам, а при следующей записи строки заполняются."""
         ws = self._ws(SHEET_OPERATIONS)
         header = ws.row_values(1)
-        if len(header) >= 10 and str(header[9]).strip():
+        wanted = HEADERS[SHEET_OPERATIONS]
+        if len(header) >= len(wanted) and all(str(h).strip() for h in header[9:len(wanted)]):
             return
-        if ws.col_count < 10:
-            ws.add_cols(10 - ws.col_count)
-        log.info("Добавляю колонку «Вид» в лист «Операции»")
-        ws.update([["Вид"]], "J1", value_input_option="RAW")
+        if ws.col_count < len(wanted):
+            ws.add_cols(len(wanted) - ws.col_count)
+        log.info("Добавляю колонки «Вид» и «Статья поездки» в лист «Операции»")
+        ws.update([wanted[9:]], "J1:K1", value_input_option="RAW")
 
     def _add_emoji_column(self) -> None:
         """Для листа «Категории», созданного старой версией: дописать колонку «Эмодзи» с эмодзи
@@ -580,7 +583,7 @@ class SheetsStorage(Storage):
             ws = self._ws(SHEET_OPERATIONS)
             ids = await self._run(ws.col_values, 9)
             row_of = {v: i + 1 for i, v in enumerate(ids) if i > 0}
-            data = [{"range": f"A{row_of[op.id]}:J{row_of[op.id]}", "values": [op_to_row(op)]}
+            data = [{"range": f"A{row_of[op.id]}:K{row_of[op.id]}", "values": [op_to_row(op)]}
                     for op in ops if op.id in row_of]
             if data:
                 await self._run(ws.batch_update, data, value_input_option="USER_ENTERED")

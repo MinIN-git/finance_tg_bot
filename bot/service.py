@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from . import reports
 from .categories import find_category, guess_category, learnable_keyword
 from .models import (
-    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_TAG_PREFIX, Account, Kind, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip, is_heavy,
+    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_ITEM_ICONS, TRIP_ITEMS, TRIP_TAG_PREFIX, Account, Kind, guess_trip_item, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip, is_heavy,
     trip_tag,
 )
 from . import trips as trips_mod
@@ -116,6 +116,7 @@ class FinanceService:
         if trip is not None and op.type == OpType.EXPENSE and trip.tag not in op.tags and not is_heavy(op):
             op.tags.append(trip.tag)          # трата в даты поездки — сразу командировочная
             op.kind = Kind.TRIP
+            op.trip_item = guess_trip_item(op.comment, op.category)
         categories = await self._categories()
         if parsed.explicit_sign:
             op.category = guess_category(op.comment, op.type, categories) or ""
@@ -228,6 +229,8 @@ class FinanceService:
         if trip_tag(op):
             city = self._trip_names.get(trip_tag(op))
             parts.append(f"✈️ {html.escape(city)}" if city else "✈️ командировка")
+            if op.trip_item:
+                parts.append(f"{TRIP_ITEM_ICONS[op.trip_item]} {op.trip_item}")
         tags = [t for t in op.tags if t not in reports.HIDDEN_TAGS]
         if tags:
             parts.append(" ".join(f"#{html.escape(t)}" for t in tags))
@@ -410,6 +413,13 @@ class FinanceService:
             tags.append(trip.tag)
         kind = Kind.HEAVY if is_heavy(current) else (Kind.TRIP if on else Kind.REGULAR)
         op = replace(current, tags=tags, kind=kind)
+        return op if await self.storage.update_operation(op) else None
+
+    async def set_trip_item(self, op_id: str, item: str) -> Operation | None:
+        current = await self.get_operation(op_id)
+        if current is None or current.kind != Kind.TRIP or item not in TRIP_ITEMS:
+            return None
+        op = replace(current, trip_item=item, tags=list(current.tags))
         return op if await self.storage.update_operation(op) else None
 
     async def trip_command(self, args: str | None) -> str:

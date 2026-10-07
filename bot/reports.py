@@ -14,7 +14,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterable, Mapping, Sequence
 
-from .models import BalanceEntry, BigPurchase, Operation, OpType, Trip, is_heavy, is_regular, is_trip, trip_tag
+from .models import (
+    TRIP_ITEM_ICONS, BalanceEntry, BigPurchase, Operation, OpType, Trip, is_heavy, is_regular, is_trip, trip_tag,
+)
 from .textutil import (
     MONTHS_GENITIVE, MONTHS_NOMINATIVE, MONTHS_SHORT, fmt_date, fmt_k, fmt_money, fmt_percent, fmt_short_date,
     fmt_trip_range, month_title,
@@ -601,6 +603,14 @@ def trip_groups(trip_ops: Sequence[Operation], trips: Sequence[Trip]) -> list[tu
     return out
 
 
+def trip_items_totals(items: Sequence[Operation]) -> list[tuple[str, Decimal]]:
+    """Суммы по статьям поездки, по убыванию."""
+    parts: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    for o in items:
+        parts[o.trip_item or "Прочее"] += o.amount
+    return _sorted_totals(parts)
+
+
 def format_trips_view(
     title: str, trip_ops: Sequence[Operation], trips: Sequence[Trip], cur: str = "", icons: Icons | None = None,
 ) -> str:
@@ -610,10 +620,7 @@ def format_trips_view(
     for name, items in trip_groups(trip_ops, trips):
         total = sum((o.amount for o in items), ZERO)
         lines += ["", f"<b>{name}</b> — {fmt_money(total, cur)}"]
-        cats: dict[str, Decimal] = defaultdict(lambda: ZERO)
-        for o in items:
-            cats[o.category or "Без категории"] += o.amount
-        lines += [f"   {_label(icons, OpType.EXPENSE, n)} {fmt_money(a, cur)}" for n, a in _sorted_totals(cats)]
+        lines += [f"   {TRIP_ITEM_ICONS[n]} {n} {fmt_money(a, cur)}" for n, a in trip_items_totals(items)]
     return "\n".join(lines)
 
 

@@ -33,6 +33,7 @@ class Operation:
     tags: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
     kind: Kind = Kind.REGULAR
+    trip_item: str = ""    # статья поездки (только у командировочных): Жилье, Кафешки, Билеты, Транспорт, Прочее
 
     def __post_init__(self) -> None:
         # Вид и теги согласованы: #тяжелое или тег поездки задают вид, если он не указан явно.
@@ -40,6 +41,10 @@ class Operation:
             self.kind = Kind.REGULAR
         elif self.kind == Kind.REGULAR:
             self.kind = kind_from_tags(self.tags)
+        if self.kind != Kind.TRIP:
+            self.trip_item = ""
+        elif self.trip_item not in TRIP_ITEMS:
+            self.trip_item = guess_trip_item(self.comment, self.category)
 
 
 @dataclass
@@ -101,6 +106,33 @@ def kind_from_tags(tags: list[str]) -> Kind:
 
 
 TRIP_TAG_PREFIX = "поездка-"
+
+# Статьи командировок (как в старом листе «Командировки»).
+TRIP_ITEMS = ["Жилье", "Кафешки", "Билеты", "Транспорт", "Прочее"]
+TRIP_ITEM_ICONS = {"Жилье": "🏨", "Кафешки": "🍽", "Билеты": "🚆", "Транспорт": "🚕", "Прочее": "📌"}
+TRIP_ITEM_WORDS = [   # по словам в комментарии; первое совпадение
+    ("Жилье", ("отел", "гостиниц", "хостел", "квартир", "жиль", "airbnb", "суточн", "посуточн", "апартамент")),
+    ("Билеты", ("ржд", "жд", "поезд", "самолет", "авиа", "билет", "аэроэкспресс", "ласточк", "сапсан")),
+    ("Транспорт", ("такси", "метро", "автобус", "каршеринг", "транспорт", "трансфер", "электричк")),
+]
+TRIP_ITEM_BY_CATEGORY = {"Еда вне дома": "Кафешки", "Транспорт/РЖД": "Транспорт"}
+TRIP_ITEM_ALIASES = {"жд билеты": "Билеты", "кафешки": "Кафешки", "жилье": "Жилье", "транспорт": "Транспорт",
+                     "прочее": "Прочее", "билеты": "Билеты"}
+_MARKER_RE = re.compile(r"\[[^\]\s]+-\d{6}\s(.+?)\]")   # метка миграции: [командировка-130726 ЖД билеты]
+
+
+def guess_trip_item(comment: str, category: str) -> str:
+    """Статья поездки: из метки миграции, по словам в комментарии, затем по категории."""
+    m = _MARKER_RE.search(comment)
+    if m:
+        item = TRIP_ITEM_ALIASES.get(m.group(1).strip().lower().replace("ё", "е"))
+        if item:
+            return item
+    words = re.findall(r"\w+", comment.lower().replace("ё", "е"))
+    for item, stems in TRIP_ITEM_WORDS:
+        if any(w.startswith(stems) for w in words):
+            return item
+    return TRIP_ITEM_BY_CATEGORY.get(category, "Прочее")
 
 
 @dataclass

@@ -8,7 +8,8 @@ from decimal import Decimal
 from typing import Sequence
 
 from .models import Operation, OpType, Trip
-from .reports import deviation
+from .models import TRIP_ITEM_ICONS
+from .reports import deviation, trip_items_totals
 from .textutil import fmt_money, fmt_trip_range
 
 ZERO = Decimal(0)
@@ -102,7 +103,10 @@ def format_trips(trips: Sequence[Trip], ops: Sequence[Operation], today: date, c
     lines = ["🧳 <b>Командировки</b>"]
     for t in ordered[:limit]:
         tail = " · впереди" if t.start > today else (" · идет" if t.end >= today else "")
-        lines.append(f"{html.escape(t.city)} {fmt_range(t)} · {t.days} дн · {fmt_money(trip_total(t, ops), cur)}{tail}")
+        lines.append(f"<b>{html.escape(t.city)}</b> {fmt_range(t)} · {t.days} дн · {fmt_money(trip_total(t, ops), cur)}{tail}")
+        items = trip_items_totals(trip_ops(t, ops))
+        if items:
+            lines.append("   " + " · ".join(f"{TRIP_ITEM_ICONS[n]} {n} {fmt_money(a, cur)}" for n, a in items))
     done = [t for t in ordered if t.end < today and trip_total(t, ops) > 0]
     if done:
         totals = [trip_total(t, ops) for t in done]

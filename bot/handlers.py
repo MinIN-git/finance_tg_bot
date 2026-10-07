@@ -48,6 +48,7 @@ HELP = """<b>✍️ Записать</b> — просто сообщением
 /trip Казань 13.10–16.10 — завести поездку: траты в эти даты пометятся сами,
 билеты заранее — кнопкой «✈️ В Казань» под тратой
 /trip — ближайшая поездка · /trip cancel — отменить · /trips — все поездки
+Статью поездки (🏨 Жилье, 🍽 Кафешки, 🚆 Билеты, 🚕 Транспорт, 📌 Прочее) бот определит сам; сменить — кнопкой «🧳 Статья»
 
 <b>⚙️ Настройка</b>
 /categories — категории · /signals on|off — напоминания · /refresh — перечитать таблицу"""
@@ -84,6 +85,11 @@ class ReportView(CallbackData, prefix="rv"):
 class StatsView(CallbackData, prefix="sv"):
     n: int
     view: str   # main | heavy | trips
+
+
+class TripItemCb(CallbackData, prefix="ti"):
+    op_id: str
+    idx: int  # -1 — показать список статей
 
 
 class TripMark(CallbackData, prefix="tm"):
@@ -214,6 +220,8 @@ def saved_keyboard(op: Operation, trip=None, in_trip: bool = False) -> InlineKey
         kb.button(text="🏷 Категория", callback_data=ChangeCat(op_id=op.id, idx=-1))
     if trip is not None:
         if in_trip:
+            kb.button(text=f"🧳 Статья: {op.trip_item}" if op.trip_item else "🧳 Статья",
+                      callback_data=TripItemCb(op_id=op.id, idx=-1))
             kb.button(text="✖️ Не командировка", callback_data=TripMark(op_id=op.id, on=False))
         else:
             kb.button(text=f"✈️ В {trip.city}"[:40], callback_data=TripMark(op_id=op.id, on=True))
@@ -320,6 +328,29 @@ async def cmd_trip(message: Message, command: CommandObject, svc: FinanceService
 @router.message(Command("trips", "командировки", "поездки"))
 async def cmd_trips(message: Message, svc: FinanceService) -> None:
     await message.answer(await svc.trips_text())
+
+
+@router.callback_query(TripItemCb.filter())
+async def on_trip_item(call: CallbackQuery, callback_data: TripItemCb, svc: FinanceService) -> None:
+    from .models import TRIP_ITEM_ICONS, TRIP_ITEMS
+
+    if callback_data.idx < 0:
+        kb = InlineKeyboardBuilder()
+        for i, item in enumerate(TRIP_ITEMS):
+            kb.button(text=f"{TRIP_ITEM_ICONS[item]} {item}", callback_data=TripItemCb(op_id=callback_data.op_id, idx=i))
+        kb.adjust(3)
+        await call.message.edit_reply_markup(reply_markup=kb.as_markup())
+        await call.answer()
+        return
+    op = await svc.set_trip_item(callback_data.op_id, TRIP_ITEMS[callback_data.idx])
+    if op is None:
+        await call.answer("Не получилось: это не командировочная трата", show_alert=True)
+        return
+    try:
+        await call.message.edit_text(f"✅ {svc.describe(op)}", reply_markup=await saved_kb(svc, op))
+    except TelegramBadRequest:
+        pass
+    await call.answer(f"Статья: {op.trip_item}")
 
 
 @router.callback_query(TripMark.filter())

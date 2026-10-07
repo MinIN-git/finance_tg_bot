@@ -132,7 +132,7 @@ def run(coro):
 def test_ensure_sheets_creates_and_seeds(storage):
     sheets = storage._sh.sheets
     assert set(sheets) == {"Лист1", "Операции", "Счета", "Категории", "Остатки", "Большие покупки", "Поездки"}
-    assert sheets["Операции"].rows[0][-2:] == ["id", "Вид"]
+    assert sheets["Операции"].rows[0][-3:] == ["id", "Вид", "Статья поездки"]
     accounts = run(storage.list_accounts())
     assert [(a.name, a.prompt) for a in accounts][0] == ("Карта", "Сколько на карте?")
     cats = run(storage.list_categories())
@@ -264,9 +264,10 @@ def test_old_operations_sheet_gets_kind_column(monkeypatch):
     assert old.rows[0][9] == "Вид"
     ops = run(s.list_operations())
     assert [o.kind.value for o in ops] == ["тяжелая", "обычная"]      # без «Вида» — по тегам
-    ops[1].kind = st.Kind.TRIP
+    assert old.rows[0][10] == "Статья поездки"
+    ops[1] = Operation(**{**ops[1].__dict__, "kind": st.Kind.TRIP, "trip_item": ""})
     run(s.update_operation(ops[1]))
-    assert old.rows[2][9] == "командировка"
+    assert old.rows[2][9:11] == ["командировка", "Прочее"]
 
 
 def test_link_big_purchase_and_read_sheet(monkeypatch):
