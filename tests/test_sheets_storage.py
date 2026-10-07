@@ -263,3 +263,22 @@ def test_old_operations_sheet_gets_kind_column(monkeypatch):
     ops[1].kind = st.Kind.TRIP
     run(s.update_operation(ops[1]))
     assert old.rows[2][9] == "командировка"
+
+
+def test_link_big_purchase_and_read_sheet(monkeypatch):
+    import gspread
+
+    client = FakeClient()
+    big = client.sh.add_worksheet("Большие покупки", 100, 3)
+    big.rows = [["Дата", "Что купил", "Стоимость"], [46271, "Отпуск в Турцию", 283122], [46250, "Кольцо", 77960]]
+    client.sh.add_worksheet("Командировки", 10, 3).rows = [["13.06.2026 – 16.06.2026", ""], ["Кафешки", 100]]
+    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
+    s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
+    s.ensure_sheets()
+    item = run(s.list_big_purchases())[0]
+    assert run(s.link_big_purchase(item, "op9", "Досуг"))
+    assert big.rows[1][3:5] == ["Досуг", "op9"] and big.rows[2][3:5] in ([], ["", ""])
+    assert not run(s.link_big_purchase(item, "op9", "Досуг"))       # уже связана — второй раз не трогает
+    formatted, raw = run(s.read_sheet("Командировки"))
+    assert formatted[1] == ["Кафешки", "100"] or formatted[1][0] == "Кафешки"
+    assert run(s.read_sheet("Нет такого")) is None

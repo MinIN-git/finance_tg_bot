@@ -95,6 +95,14 @@ class Storage(ABC):
     async def list_trips(self) -> list[Trip]:
         return []
 
+    async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
+        """Вписать категорию и id операции в существующую строку «Больших покупок» (без id)."""
+        raise NotImplementedError
+
+    async def read_sheet(self, title: str) -> tuple[list[list[Any]], list[list[Any]]] | None:
+        """Произвольный лист: (отформатированные значения, «сырые»); None — листа нет."""
+        return None
+
     async def add_trip(self, trip: Trip) -> None:
         raise NotImplementedError
 
@@ -120,6 +128,7 @@ class MemoryStorage(Storage):
         balances: list[BalanceEntry] | None = None,
         big_purchases: list[BigPurchase] | None = None,
         trips: list[Trip] | None = None,
+        sheets: dict[str, tuple[list[list[Any]], list[list[Any]]]] | None = None,
     ) -> None:
         self.operations = list(operations or [])
         self.categories = copy.deepcopy(categories if categories is not None else DEFAULT_CATEGORIES)
@@ -127,6 +136,7 @@ class MemoryStorage(Storage):
         self.balances = list(balances or [])
         self.big_purchases = list(big_purchases or [])
         self.trips = list(trips or [])
+        self.sheets = dict(sheets or {})
 
     async def list_operations(self) -> list[Operation]:
         return list(self.operations)
@@ -174,6 +184,16 @@ class MemoryStorage(Storage):
 
     async def list_trips(self) -> list[Trip]:
         return list(self.trips)
+
+    async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
+        for b in self.big_purchases:
+            if not b.op_id and (b.date, b.amount, b.what) == (item.date, item.amount, item.what):
+                b.op_id, b.category = op_id, category
+                return True
+        return False
+
+    async def read_sheet(self, title: str):
+        return self.sheets.get(title)
 
     async def add_trip(self, trip: Trip) -> None:
         self.trips.append(trip)
@@ -670,6 +690,30 @@ class SheetsStorage(Storage):
             if ids[idx] == op_id:
                 return lay, idx + 1
         return None, None
+
+    async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
+        async with self._lock:
+            lay = await self._run(self._big_layout)
+            if lay is None:
+                return False
+            formatted, raw = await self._run(self.read_grid, SHEET_BIG)
+            for r in range(lay.header + 1, len(formatted)):
+                found = parse_big_purchases([formatted[lay.header], formatted[r]], [raw[lay.header], raw[r]])
+                if found and not found[0].op_id and (found[0].date, found[0].amount, found[0].what) == (item.date, item.amount, item.what):
+                    ws = self._ws(SHEET_BIG)
+                    await self._run(ws.update, [[text_for_sheet(category)]], f"{_col_letter(lay.cat_col)}{r + 1}",
+                                    value_input_option="USER_ENTERED")
+                    await self._run(ws.update, [[text_for_sheet(op_id)]], f"{_col_letter(lay.id_col)}{r + 1}",
+                                    value_input_option="USER_ENTERED")
+                    return True
+            return False
+
+    async def read_sheet(self, title: str):
+        try:
+            return await self._run(self.read_grid, title)
+        except Exception:
+            log.warning("Не удалось прочитать лист «%s»", title, exc_info=True)
+            return None
 
     async def delete_big_purchase(self, op_id: str) -> None:
         async with self._lock:
