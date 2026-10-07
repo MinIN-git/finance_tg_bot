@@ -339,3 +339,21 @@ def test_update_operations_batch_without_rereading(storage):
     assert reads["n"] == 0                       # лист не перечитывался
     storage._ops = None
     assert [o.amount for o in run(storage.list_operations())] == [10, 20, 30, 40]
+
+
+def test_worksheet_objects_cached(storage):
+    calls = {"n": 0}
+    orig = storage._sh.worksheets
+
+    def counting():
+        calls["n"] += 1
+        return orig()
+
+    storage._sh.worksheets = counting
+    storage._worksheets = {}
+    for _ in range(5):
+        storage._ws("Операции")
+        storage._ws("Категории")
+    assert calls["n"] == 1
+    with pytest.raises(Exception):
+        storage._ws("Нет такого листа")

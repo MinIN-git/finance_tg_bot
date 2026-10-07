@@ -397,6 +397,7 @@ class SheetsStorage(Storage):
         self._sh = self._gc.open_by_key(spreadsheet_id)
         self._ttl = cache_ttl
         self._sleep = time.sleep
+        self._worksheets: dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._ops: list[Operation] | None = None
         self._ops_loaded_at = 0.0
@@ -409,12 +410,14 @@ class SheetsStorage(Storage):
     def ensure_sheets(self) -> None:
         """Создает недостающие листы с заголовками и заполняет справочники по умолчанию.
         Существующие листы не трогает."""
-        existing = {ws.title for ws in self._sh.worksheets()}
+        self._worksheets = {ws.title: ws for ws in self._sh.worksheets()}
+        existing = set(self._worksheets)
         for title, header in HEADERS.items():
             if title in existing:
                 continue
             log.info("Создаю лист «%s»", title)
             ws = self._sh.add_worksheet(title=title, rows=1000, cols=len(header))
+            self._worksheets[title] = ws
             rows: list[list[Any]] = [header]
             if title == SHEET_CATEGORIES:
                 rows += [[c.name, c.type.value, ", ".join(c.keywords), c.emoji] for c in DEFAULT_CATEGORIES]
@@ -459,7 +462,17 @@ class SheetsStorage(Storage):
         ws.update(column, f"D1:D{len(column)}", value_input_option="RAW")
 
     def _ws(self, title: str):
-        return self._sh.worksheet(title)
+        """Объект листа из кэша: gspread.worksheet() каждый раз читает метаданные таблицы,
+        а это отдельный запрос в квоту чтений."""
+        ws = self._worksheets.get(title)
+        if ws is None:
+            self._worksheets = {w.title: w for w in self._sh.worksheets()}
+            ws = self._worksheets.get(title)
+            if ws is None:
+                from gspread.exceptions import WorksheetNotFound
+
+                raise WorksheetNotFound(title)
+        return ws
 
     def _read(self, title: str) -> list[list[Any]]:
         from gspread.utils import DateTimeOption, ValueRenderOption
