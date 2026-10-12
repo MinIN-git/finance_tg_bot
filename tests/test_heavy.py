@@ -19,19 +19,15 @@ def op(d, t, amount, cat, tags=()):
     return Operation(date=d, type=t, amount=Decimal(amount), category=cat, tags=list(tags))
 
 
-def test_heavy_tag_on_input_writes_big_purchase():
+def test_heavy_tag_on_input_is_heavy_kind():
     svc = FinanceService(MemoryStorage(), today_fn=lambda: TODAY)
     p = run(svc.prepare("283122 отпуск турция #крупное"))
     assert p.op.tags == ["тяжелое"]
     p.op.category = "Досуг"
     run(svc.save(p.op))
-    [b] = run(svc.storage.list_big_purchases())
-    assert (b.what, b.amount, b.category, b.op_id) == ("отпуск турция", 283122, "Досуг", p.op.id)
+    assert run(svc.get_operation(p.op.id)).kind.value == "тяжелая"
     assert "🧾 тяжелая трата" in svc.describe(p.op) and "#тяжелое" not in svc.describe(p.op)
-    run(svc.set_category(p.op.id, "Подарки"))
-    assert run(svc.storage.list_big_purchases())[0].category == "Подарки"
-    run(svc.undo())
-    assert run(svc.storage.list_big_purchases()) == []
+    assert run(svc.storage.list_big_purchases()) == []   # лист «Большие покупки» бот больше не ведет
 
 
 def test_summarize_clean_only_regular():

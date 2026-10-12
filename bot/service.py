@@ -14,9 +14,9 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from . import reports
-from .categories import find_category, guess_category, learnable_keyword
+from .categories import find_category, guess_category, learnable_keyword, subject
 from .models import (
-    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_ITEM_ICONS, TRIP_ITEMS, TRIP_TAG_PREFIX, Account, Kind, guess_trip_item, BalanceEntry, BigPurchase, Category, Operation, OpType, Trip, is_heavy,
+    HEAVY_TAG, HEAVY_TAG_ALIASES, TRIP_ITEM_ICONS, TRIP_ITEMS, TRIP_TAG_PREFIX, Account, Kind, guess_trip_item, BalanceEntry, Category, Operation, OpType, Trip, is_heavy,
     trip_tag,
 )
 from . import trips as trips_mod
@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 PENDING_LIMIT = 50
 SNAPSHOT_TTL = 12 * 3600   # опрос остатков без ответа дольше — закрывается, и число снова пишется тратой
+EDIT_TTL = 3600   # «✏️ Сумма»: столько секунд ждем новую сумму, потом число снова пишется тратой
 UNDO_DEPTH = 20   # сколько последних записей бота можно отменить через /undo подряд
 PLAIN_AMOUNT_RE = re.compile(r"^(\d+(?:[.,]\d{1,2})?)(к|k)?(?:р|руб|₽|€|\$|eur|евро)?\.?$")
 
@@ -85,6 +86,7 @@ class FinanceService:
         self._finished_purpose: dict[int, str] = {}
         self._icons: dict[tuple[OpType, str], str] = {}
         self._trip_names: dict[str, str] = {}   # тег поездки -> город, для describe()
+        self._editing: dict[int, tuple[str, float]] = {}   # user_id -> (id операции, когда нажали «✏️ Сумма»)
 
     async def _categories(self) -> list[Category]:
         """Категории из хранилища; заодно обновляет кэш эмодзи для describe()."""
@@ -123,11 +125,11 @@ class FinanceService:
             op.trip_item = guess_trip_item(op.comment, op.category)
         categories = await self._categories()
         if parsed.explicit_sign:
-            op.category = guess_category(op.comment, op.type, categories) or ""
+            op.category = guess_category(subject(op.comment), op.type, categories) or ""
             return Prepared(op, needs_category=not op.category)
         # Без знака: по умолчанию расход, но если слово знакомо только доходной категории — доход.
-        expense = guess_category(op.comment, OpType.EXPENSE, categories)
-        income = guess_category(op.comment, OpType.INCOME, categories)
+        expense = guess_category(subject(op.comment), OpType.EXPENSE, categories)
+        income = guess_category(subject(op.comment), OpType.INCOME, categories)
         if expense and income:
             return Prepared(op, needs_category=False, type_choices={OpType.INCOME: income, OpType.EXPENSE: expense})
         if income:
@@ -138,15 +140,9 @@ class FinanceService:
 
     async def save(self, op: Operation) -> Operation:
         await self.storage.add_operation(op)
+        self.state.set("last_saved_at", datetime.now(self.tz).isoformat())
         saved = [i for i in self.state.get("saved_op_ids", []) if i != op.id][-(UNDO_DEPTH - 1):]
         self.state.set("saved_op_ids", [*saved, op.id])
-        if is_heavy(op):
-            try:
-                await self.storage.add_big_purchase(
-                    BigPurchase(op.date, op.comment or op.category, op.amount, op.category, op.id)
-                )
-            except Exception:
-                log.exception("Не удалось дописать тяжелую трату в «Большие покупки»")
         return op
 
     def stash(self, op: Operation, type_choices: dict[OpType, str] | None = None) -> str:
@@ -179,7 +175,7 @@ class FinanceService:
         if kw is None:
             return None
         categories = await self._categories()
-        if guess_category(op.comment, op.type, categories) == op.category:
+        if guess_category(subject(op.comment), op.type, categories) == op.category:
             return None
         await self.storage.add_keyword(op.category, op.type, kw)
         return kw
@@ -195,11 +191,42 @@ class FinanceService:
         if current is None:
             return None
         op = replace(current, category=category, tags=list(current.tags))
-        if not await self.storage.update_operation(op):
+        return op if await self.storage.update_operation(op) else None
+
+    async def last_activity(self) -> datetime | None:
+        """Когда последний раз что-то записывали: время записи через бота, а до первой такой записи —
+        самая поздняя дата операции в таблице (полдень этого дня)."""
+        saved = self.state.get("last_saved_at")
+        if saved:
+            return datetime.fromisoformat(saved)
+        ops = await self.storage.list_operations()
+        if not ops:
             return None
-        if is_heavy(op):
-            await self.storage.set_big_purchase_category(op.id, category)
-        return op
+        d = max(op.date for op in ops)
+        return datetime(d.year, d.month, d.day, 12, tzinfo=self.tz)
+
+    # ---------- правка суммы ----------
+
+    def start_edit_amount(self, user_id: int, op_id: str) -> None:
+        self._editing[user_id] = (op_id, time.monotonic())
+
+    def editing_op_id(self, user_id: int) -> str | None:
+        """Операция, для которой ждем новую сумму (None — не ждем или ждали дольше часа)."""
+        item = self._editing.get(user_id)
+        if item is None or time.monotonic() - item[1] > EDIT_TTL:
+            self._editing.pop(user_id, None)
+            return None
+        return item[0]
+
+    def cancel_edit_amount(self, user_id: int) -> None:
+        self._editing.pop(user_id, None)
+
+    async def set_amount(self, op_id: str, amount: Decimal) -> Operation | None:
+        current = await self.get_operation(op_id)
+        if current is None:
+            return None
+        op = replace(current, amount=amount, tags=list(current.tags))
+        return op if await self.storage.update_operation(op) else None
 
     async def undo(self) -> Operation | None:
         """Отменяет последнюю запись, сделанную ботом (строки, вписанные в таблицу руками, не трогает)."""
@@ -212,10 +239,7 @@ class FinanceService:
         return None
 
     async def delete(self, op_id: str) -> Operation | None:
-        op = await self.storage.delete_operation(op_id)
-        if op is not None and is_heavy(op):
-            await self.storage.delete_big_purchase(op.id)
-        return op
+        return await self.storage.delete_operation(op_id)
 
     async def last(self, n: int = 10) -> list[Operation]:
         await self._categories()

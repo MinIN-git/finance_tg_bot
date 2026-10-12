@@ -90,11 +90,18 @@ def guess_category(comment: str, op_type: OpType, categories: Iterable[Category]
     return best[1] if best else None
 
 
+def subject(comment: str) -> str:
+    """Что за трата — часть до первой запятой. После запятой — свободный комментарий
+    («здоровье, сходил к врачу по поводу спины»): он не угадывает категорию и не запоминается."""
+    return comment.split(",", 1)[0]
+
+
 def learnable_keyword(comment: str) -> str | None:
-    """Слово из комментария, которое стоит запомнить как ключевое для выбранной категории."""
-    for w in words(comment):
-        if len(w) >= 3 and not w.isdigit():
-            return w
+    """Слово, которое стоит запомнить как ключевое для выбранной категории: только если до запятой
+    ровно одно слово («хинкали», «хинкали, в грузинском»), иначе в ключевые слова попадет мусор."""
+    ws = words(subject(comment))
+    if len(ws) == 1 and len(ws[0]) >= 3 and not ws[0].isdigit():
+        return ws[0]
     return None
 
 

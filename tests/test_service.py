@@ -218,3 +218,54 @@ def test_ambiguous_word_asks_type(svc_vuz):
 def test_expense_keyword_stays_expense(svc_vuz):
     p = run(svc_vuz.prepare("350 кофе"))
     assert p.op.type == OpType.EXPENSE and p.op.category == "Еда вне дома"
+
+
+def test_comment_after_comma_not_guessed_or_learned(svc):
+    p = run(svc.prepare("1000 здоровье, сходил к врачу по поводу спины"))
+    assert p.op.category == "Здоровье"
+    assert p.op.comment == "здоровье, сходил к врачу по поводу спины"
+    # после запятой — только комментарий: «кофе» там не делает трату едой
+    assert run(svc.prepare("1000 остеопат, потом кофе")).needs_category
+
+
+def test_learn_only_single_word_subject(svc):
+    p = run(svc.prepare("3000 сходил к остеопату"))
+    p.op.category = "Здоровье"
+    assert run(svc.learn(p.op)) is None            # фраза — ничего не запоминаем
+    p = run(svc.prepare("3000 остеопат, по поводу спины"))
+    p.op.category = "Здоровье"
+    assert run(svc.learn(p.op)) == "остеопат"
+    assert run(svc.prepare("2500 остеопат")).op.category == "Здоровье"
+
+
+def test_set_amount(svc):
+    op = run(svc.save(run(svc.prepare("350 кофе")).op))
+    assert run(svc.set_amount(op.id, Decimal(530))).amount == 530
+    assert run(svc.get_operation(op.id)).amount == 530
+
+
+def test_idle_reminder_once_per_gap(svc):
+    from datetime import datetime, timedelta
+    from bot.notify import send_idle_reminder
+
+    class Bot:
+        sent = []
+        async def send_message(self, chat_id, text):
+            self.sent.append(text)
+
+    bot = Bot()
+    run(svc.save(run(svc.prepare("350 кофе")).op))
+    saved = datetime.fromisoformat(svc.state.get("last_saved_at"))
+    assert not run(send_idle_reminder(bot, [1], svc, saved + timedelta(days=2)))
+    assert run(send_idle_reminder(bot, [1], svc, saved + timedelta(days=3, hours=1)))
+    assert "3 дн. ничего не записано" in bot.sent[0]
+    assert not run(send_idle_reminder(bot, [1], svc, saved + timedelta(days=5)))   # уже напомнили
+    run(svc.save(run(svc.prepare("100 кофе")).op))
+    later = datetime.fromisoformat(svc.state.get("last_saved_at")) + timedelta(days=4)
+    assert run(send_idle_reminder(bot, [1], svc, later))                          # новый перерыв
+
+
+def test_idle_reminder_falls_back_to_last_op_date(svc):
+    from datetime import datetime
+    run(svc.storage.add_operation(Operation(date(2026, 10, 1), OpType.EXPENSE, Decimal(1), "Досуг")))
+    assert run(svc.last_activity()) == datetime(2026, 10, 1, 12, tzinfo=svc.tz)

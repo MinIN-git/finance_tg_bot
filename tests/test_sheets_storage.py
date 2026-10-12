@@ -131,7 +131,7 @@ def run(coro):
 
 def test_ensure_sheets_creates_and_seeds(storage):
     sheets = storage._sh.sheets
-    assert set(sheets) == {"Лист1", "Операции", "Счета", "Категории", "Остатки", "Большие покупки", "Поездки"}
+    assert set(sheets) == {"Лист1", "Операции", "Счета", "Категории", "Остатки", "Поездки"}
     assert sheets["Операции"].rows[0][-3:] == ["id", "Вид", "Статья поездки"]
     accounts = run(storage.list_accounts())
     assert [(a.name, a.prompt) for a in accounts][0] == ("Карта", "Сколько на карте?")
@@ -246,7 +246,9 @@ def test_emoji_column_added_to_old_categories_sheet(monkeypatch):
 
 
 def test_big_purchases_columns_and_rows(storage):
-    ws = storage._sh.sheets["Большие покупки"]
+    ws = storage._sh.add_worksheet("Большие покупки", 100, 5)
+    ws.rows = [["Дата", "Что купил", "Стоимость", "Категория", "id"]]
+    storage._worksheets = {}
     assert ws.rows[0] == ["Дата", "Что купил", "Стоимость", "Категория", "id"]
     run(storage.add_big_purchase(st.BigPurchase(date(2026, 9, 3), "отпуск турция", Decimal(283122), "Досуг", "op1")))
     run(storage.add_big_purchase(st.BigPurchase(date(2026, 9, 4), "диван", Decimal(50000), "", "op2")))
@@ -266,6 +268,8 @@ def test_old_big_sheet_gets_category_column(monkeypatch):
     monkeypatch.setattr(gspread, "service_account", lambda filename: client)
     s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
     s.ensure_sheets()
+    assert old.rows[1] == ["Дата", "Что купил", "Стоимость"]     # бот лист больше не трогает
+    s.ensure_big_columns()                                       # только скрипт миграции
     assert old.rows[1] == ["Дата", "Что купил", "Стоимость", "Категория", "id"]
     old.rows[2] += ["Досуг"]                          # Иван вписал категорию
     [b] = run(s.list_big_purchases())

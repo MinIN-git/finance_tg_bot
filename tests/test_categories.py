@@ -44,7 +44,9 @@ def test_longest_keyword_wins():
 
 
 def test_learnable_keyword():
-    assert learnable_keyword("Шаурма у метро") == "шаурма"
+    assert learnable_keyword("Шаурма") == "шаурма"
+    assert learnable_keyword("Шаурма, у метро") == "шаурма"
+    assert learnable_keyword("Шаурма у метро") is None     # фраза без запятой — не учим
     assert learnable_keyword("2 шт") is None
     assert learnable_keyword("") is None
 

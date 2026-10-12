@@ -28,7 +28,9 @@ HELP = """<b>✍️ Записать</b> — просто сообщением
 <code>2000 продукты @наличные</code> — с другого счета
 <code>5000 Карта -> Вклад</code> — перевод между счетами
 <code>283000 отпуск #тяжелое</code> — тяжелая трата: в статистике считается отдельно
+<code>1000 здоровье, сходил к врачу</code> — после запятой просто комментарий
 Без «+» — расход; слова доходных категорий («зп», «стипендия») пишутся доходом сами.
+Под записью: ↩️ отменить · 🏷 категория · ✏️ сумма
 
 <b>📅 Сейчас</b>
 /month — текущий месяц · /week — неделя
@@ -66,6 +68,10 @@ class PickType(CallbackData, prefix="pt"):
 class ChangeCat(CallbackData, prefix="cc"):
     op_id: str
     idx: int  # -1 — показать список
+
+
+class EditAmount(CallbackData, prefix="ea"):
+    op_id: str
 
 
 class DelOp(CallbackData, prefix="del"):
@@ -218,6 +224,7 @@ def saved_keyboard(op: Operation, trip=None, in_trip: bool = False) -> InlineKey
     kb.button(text="↩️ Отменить", callback_data=DelOp(op_id=op.id))
     if op.type != OpType.TRANSFER:
         kb.button(text="🏷 Категория", callback_data=ChangeCat(op_id=op.id, idx=-1))
+    kb.button(text="✏️ Сумма", callback_data=EditAmount(op_id=op.id))
     if trip is not None:
         if in_trip:
             kb.button(text=f"🧳 Статья: {op.trip_item}" if op.trip_item else "🧳 Статья",
@@ -482,6 +489,18 @@ async def on_stats_view(call: CallbackQuery, callback_data: StatsView, svc: Fina
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message, svc: FinanceService) -> None:
     user_id = message.from_user.id
+    op_id = svc.editing_op_id(user_id)
+    if op_id is not None:
+        svc.cancel_edit_amount(user_id)
+        amount = parse_plain_amount(message.text)
+        if amount is not None and amount > 0:
+            op = await svc.set_amount(op_id, amount)
+            if op is None:
+                await message.answer("Операция не найдена — возможно, ее уже удалили.")
+            else:
+                await message.answer(f"✏️ Сумма исправлена: {svc.describe(op)}", reply_markup=await saved_kb(svc, op))
+            return
+        # не число — значит, передумали: сообщение обрабатывается как обычно
     q = svc.snapshot_question(user_id)
     if q is not None:
         amount = parse_plain_amount(message.text)
@@ -599,6 +618,20 @@ async def on_change_category(call: CallbackQuery, callback_data: ChangeCat, svc:
         text += f"\n🧠 Запомнил: «{html.escape(learned)}» → {html.escape(updated.category)}"
     await call.message.edit_text(text, reply_markup=await saved_kb(svc, updated))
     await call.answer("Категория изменена")
+
+
+@router.callback_query(EditAmount.filter())
+async def on_edit_amount(call: CallbackQuery, callback_data: EditAmount, svc: FinanceService) -> None:
+    op = await svc.get_operation(callback_data.op_id)
+    if op is None:
+        await call.answer("Операция не найдена", show_alert=True)
+        return
+    svc.start_edit_amount(call.from_user.id, op.id)
+    await call.message.answer(
+        f"✏️ Новая сумма для: {svc.describe(op)}\nПришлите число, например <code>1250</code>. "
+        "Передумали — просто напишите что-нибудь другое."
+    )
+    await call.answer()
 
 
 @router.callback_query(DelOp.filter())

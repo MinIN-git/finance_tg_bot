@@ -13,6 +13,7 @@ from .service import FinanceService
 log = logging.getLogger(__name__)
 
 SIGNALS_MIN_INTERVAL = timedelta(days=7)
+IDLE_DAYS = 3   # столько дней без записей — напомнить (один раз за каждый такой перерыв)
 
 
 async def send_stats(bot: Bot, chat_id: int, svc: FinanceService, n: int = 3) -> None:
@@ -38,6 +39,26 @@ async def send_month_close(bot: Bot, chat_id: int, svc: FinanceService) -> None:
             await send_stats(bot, chat_id, svc, 3)
         except Exception:
             log.exception("Не удалось отправить квартальную статистику")
+
+
+async def send_idle_reminder(bot: Bot, chat_ids, svc: FinanceService, now: datetime | None = None) -> bool:
+    """«Ничего не записано 3 дня» — один раз за перерыв. True — напоминание отправлено."""
+    now = now or datetime.now(svc.tz)
+    last = await svc.last_activity()
+    if last is None or now - last < timedelta(days=IDLE_DAYS):
+        return False
+    if svc.state.get("idle_reminded_for") == last.isoformat():
+        return False
+    days = (now.date() - last.date()).days
+    text = (f"📝 Уже {days} дн. ничего не записано. Если были траты — напишите их, можно с датой: "
+            "<code>вчера 500 кофе</code>, <code>10.10 1200 продукты</code>.")
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id, text)
+        except Exception:
+            log.exception("Не удалось отправить напоминание пользователю %s", chat_id)
+    svc.state.set("idle_reminded_for", last.isoformat())
+    return True
 
 
 async def send_signals(bot: Bot, chat_ids, svc: FinanceService, now: datetime | None = None) -> bool:

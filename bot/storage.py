@@ -38,7 +38,6 @@ HEADERS = {
     SHEET_ACCOUNTS: ["Название", "Вопрос для ежемесячного снимка"],
     SHEET_CATEGORIES: ["Название", "Тип", "Ключевые слова", "Эмодзи"],
     SHEET_BALANCES: ["Дата", "Счет", "Сумма"],
-    SHEET_BIG: ["Дата", "Что купил", "Стоимость", "Категория", "id"],
     SHEET_TRIPS: ["Город", "Начало", "Конец", "id"],
 }
 
@@ -446,7 +445,6 @@ class SheetsStorage(Storage):
             self._add_emoji_column()
         if SHEET_OPERATIONS in existing:
             self._add_kind_column()
-        self.ensure_big_columns()
 
     def _add_kind_column(self) -> None:
         """Для «Операций» старой версии: дописать заголовки «Вид» (J) и «Статья поездки» (K). Пустые значения

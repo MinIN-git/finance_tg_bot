@@ -265,3 +265,17 @@ def test_forgotten_snapshot_expires_and_number_is_expense(h, monkeypatch):
     h.text("700")                 # опрос забыт — число снова идет в траты (без слова — выбор категории)
     assert h.svc.snapshot_question(1) is None
     assert all(o.amount != 700 for o in asyncio.run(h.svc.storage.list_balances()))
+
+
+def test_edit_amount_button(h):
+    out = h.text("350 кофе")
+    out = h.click(buttons(out)["✏️ Сумма"])
+    assert "Новая сумма" in texts(out)[0]
+    out = h.text("530")
+    assert "Сумма исправлена" in texts(out)[0]
+    [op] = ops(h)
+    assert op.amount == 530
+    # после правки число снова — обычная запись
+    h.click(buttons(out)["✏️ Сумма"])
+    h.text("200 такси")                     # передумал: записалась новая трата, старая не тронута
+    assert [o.amount for o in ops(h)] == [530, 200]

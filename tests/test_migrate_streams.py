@@ -240,6 +240,8 @@ def test_full_migration_on_sheets_with_few_reads(monkeypatch):
     s = SheetsStorage("key.json", "sheet-id", cache_ttl=3600)
     s.ensure_sheets()
     sh = client.sh.sheets
+    client.sh.add_worksheet("Большие покупки", 100, 5).rows = [["Дата", "Что купил", "Стоимость", "Категория", "id"]]
+    s._worksheets = {}
     for op in history():
         sh["Операции"].rows.append([c[1:] if isinstance(c, str) and c.startswith("'") else c for c in op_to_row(op)])
     sh["Большие покупки"].rows += [[(b.date - date(1899, 12, 30)).days, b.what, int(b.amount)] for b in BIGS]

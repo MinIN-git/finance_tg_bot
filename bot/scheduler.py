@@ -8,7 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from .config import Config
 from .handlers import snapshot_question_view
-from .notify import send_month_close, send_signals
+from .notify import send_idle_reminder, send_month_close, send_signals
 from .service import FinanceService
 from .textutil import MONTHS_NOMINATIVE
 
@@ -53,6 +53,10 @@ async def monthly_fallback_job(bot: Bot, svc: FinanceService, user_ids: frozense
 async def signals_job(bot: Bot, svc: FinanceService, user_ids: frozenset[int]) -> None:
     try:
         await svc.storage.refresh()
+        await send_idle_reminder(bot, user_ids, svc)
+    except Exception:
+        log.exception("Ошибка при проверке напоминания о записях")
+    try:
         await send_signals(bot, user_ids, svc)
     except Exception:
         log.exception("Ошибка при проверке сигналов")
