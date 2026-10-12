@@ -445,17 +445,18 @@ def ops_period(start: date, end: date) -> str:
     return f"с {_on_date(start)} по {_on_date(end)}"
 
 
-def safety_months(total: Decimal, ops: Sequence[Operation], today: date) -> Decimal | None:
-    """Сколько месяцев обычных трат (без тяжелых) покрывает капитал."""
+def safety_months(total: Decimal, ops: Sequence[Operation], today: date) -> tuple[Decimal, Decimal] | None:
+    """Запас прочности: (на сколько месяцев хватит капитала, обычные траты в месяц). Обычные траты —
+    медиана за до 6 прошлых полных месяцев, без тяжелых и командировок. None — истории трат нет."""
     u = usual(ops, today)
-    return total / u.expense if u.expense else None
+    return (total / u.expense, u.expense) if u.expense else None
 
 
 def format_capital(
     s: CapitalSummary | None,
     cur: str = "",
     history: Sequence[tuple[date, Decimal]] = (),
-    safety: Decimal | None = None,
+    safety: tuple[Decimal, Decimal] | None = None,
 ) -> str:
     if s is None:
         return "Остатков пока нет. Пройдите опрос по счетам: /snapshot"
@@ -476,7 +477,9 @@ def format_capital(
     elif s.prev_date is None:
         lines.append("Это первый снимок — сравнение появится со следующего.")
     if safety is not None:
-        lines.append(f"🛟 Запас прочности: <b>{safety:.1f}</b> мес. обычных трат".replace(".", ",", 1))
+        months, monthly = safety
+        lines.append(f"🛟 Запас: <b>{months:.1f}</b>".replace(".", ",", 1)
+                     + f" мес обычной жизни (обычно {fmt_k(monthly, cur)}/мес)")
     if len(history) > 1:
         lines += ["", "<b>Снимки по месяцам:</b>"]
         rows = list(history)[-12:]

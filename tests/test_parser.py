@@ -73,6 +73,15 @@ def test_transfer():
     assert r.amount == Decimal(50000)
 
 
+def test_transfer_default_account():
+    r = p("50000 -> вклад")
+    assert r.type == OpType.TRANSFER and (r.account, r.to_account) == ("Карта", "Вклад")
+    r = p("30000 вклад ->")
+    assert (r.account, r.to_account) == ("Вклад", "Карта")
+    with pytest.raises(ParseError):
+        p("50000 -> вкдад")          # опечатка: ни одного известного счета
+
+
 def test_transfer_multiword_and_comment():
     r = p("вчера 10000 Тинькофф Black → наличные снял в банкомате")
     assert (r.account, r.to_account) == ("Тинькофф Black", "Наличные")

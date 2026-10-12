@@ -100,6 +100,10 @@ def parse_message(text: str, today: date, accounts: Sequence[str] = ()) -> Parse
         left, right = parts
         account, left = _take_account_suffix(left, accounts)
         to_account, right = _take_account_prefix(right, accounts)
+        # Один счет можно не писать — это счет по умолчанию (первый в листе «Счета»):
+        # «50000 -> вклад» — с карты на вклад, «50000 вклад ->» — с вклада на карту.
+        if accounts and (account is None) != (to_account is None):
+            account, to_account = account or accounts[0], to_account or accounts[0]
         if account is None or to_account is None:
             names = ", ".join(accounts) or "—"
             raise ParseError(f"Для перевода укажите счета из списка: {names}")

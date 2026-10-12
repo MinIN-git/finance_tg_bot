@@ -161,3 +161,15 @@ def test_capital_same_month_reference():
     assert "(+30 к 1 октября)" in text
 
 
+
+
+def test_capital_safety_margin():
+    entries = _snap(date(2026, 10, 1), card=640000)
+    ops = [op(date(2026, m, 10), E, amount, "Продукты домой") for m, amount in ((7, 190000), (8, 200000), (9, 250000))]
+    ops.append(op(date(2026, 9, 12), E, 900000, "Досуг", ["тяжелое"]))   # тяжелые не входят
+    safety = reports.safety_months(Decimal(640000), ops, date(2026, 10, 12))
+    assert safety == (Decimal("3.2"), Decimal(200000))
+    text = reports.format_capital(reports.capital_summary(entries, ops), safety=safety)
+    assert f"🛟 Запас: <b>3,2</b> мес обычной жизни (обычно 200{NB}тыс/мес)" in text
+    assert reports.safety_months(Decimal(640000), [], date(2026, 10, 12)) is None
+    assert "🛟" not in reports.format_capital(None)
