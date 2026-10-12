@@ -8,6 +8,10 @@ from decimal import Decimal
 from enum import StrEnum
 
 
+def new_op_id() -> str:
+    return uuid.uuid4().hex[:10]
+
+
 class OpType(StrEnum):
     EXPENSE = "расход"
     INCOME = "доход"
@@ -31,7 +35,7 @@ class Operation:
     to_account: str = ""
     comment: str = ""
     tags: list[str] = field(default_factory=list)
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
+    id: str = field(default_factory=new_op_id)
     kind: Kind = Kind.REGULAR
     trip_item: str = ""    # статья поездки (только у командировочных): Жилье, Кафешки, Билеты, Транспорт, Прочее
 

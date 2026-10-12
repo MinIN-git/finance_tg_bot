@@ -60,6 +60,25 @@ def test_undo_last_and_delete(svc):
     assert [o.amount for o in run(svc.last())] == [200]
 
 
+def test_undo_skips_manual_rows_and_goes_back(svc):
+    for text in ("100 кофе", "200 такси"):
+        run(svc.save(run(svc.prepare(text)).op))
+    # строка, вписанная в таблицу руками после записей бота, — /undo ее не трогает
+    manual = Operation(TODAY, OpType.EXPENSE, Decimal(999), "Досуг")
+    run(svc.storage.add_operation(manual))
+    assert run(svc.undo()).amount == 200
+    assert run(svc.undo()).amount == 100
+    assert run(svc.undo()) is None
+    assert [o.amount for o in run(svc.storage.list_operations())] == [999]
+
+
+def test_undo_skips_already_deleted(svc):
+    a = run(svc.save(run(svc.prepare("100 кофе")).op))
+    b = run(svc.save(run(svc.prepare("200 такси")).op))
+    run(svc.delete(b.id))   # удалено кнопкой
+    assert run(svc.undo()).id == a.id
+
+
 def test_set_category(svc):
     op = run(svc.save(run(svc.prepare("350 кофе")).op))
     updated = run(svc.set_category(op.id, "Досуг"))

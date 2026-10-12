@@ -103,7 +103,7 @@ def test_capital_summary_example():
     assert [(a.account, a.amount, a.delta) for a in s.accounts] == [
         ("Карта", 3100, -200), ("Вклад", 9300, 850),
     ]
-    assert s.ops_month == date(2026, 9, 1)
+    assert (s.ops_start, s.ops_end) == (date(2026, 9, 1), date(2026, 9, 30))
     assert s.ops_balance == 500
     assert s.unaccounted == 150
     assert dict(s.dynamics) == {1: 650, 3: 1900, 6: 3400}   # за 12 мес данных нет
@@ -140,6 +140,20 @@ def test_capital_new_account_and_no_operations():
     assert [(a.account, a.delta) for a in s.accounts] == [("Карта", 50), ("Наличные", None)]
     assert s.total_delta == 100
     assert s.ops_balance is None and s.unaccounted is None
+
+
+def test_capital_mid_month_snapshot_reconciles_by_dates():
+    """Ручной снимок 15.10 после снимка 1.10: сверка — по операциям 1–14 октября, а не за сентябрь."""
+    entries = _snap(date(2026, 10, 1), card=1000) + _snap(date(2026, 10, 15), card=900)
+    ops = [
+        op(date(2026, 9, 20), E, 5000, "Досуг"),     # сентябрь не входит
+        op(date(2026, 10, 3), E, 100, "Досуг"),
+        op(date(2026, 10, 15), E, 777, "Досуг"),     # день снимка — уже следующий период
+    ]
+    s = reports.capital_summary(entries, ops)
+    assert (s.ops_start, s.ops_end, s.ops_balance) == (date(2026, 10, 1), date(2026, 10, 14), -100)
+    assert s.unaccounted == 0
+    assert "Доход − траты с 1 октября по 14 октября: −100" in reports.format_capital(s)
 
 
 def test_capital_same_month_reference():

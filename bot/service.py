@@ -5,8 +5,9 @@ import asyncio
 import html
 import logging
 import re
+import time
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Callable
@@ -27,6 +28,8 @@ from .textutil import fmt_money, fmt_short_date, normalize
 log = logging.getLogger(__name__)
 
 PENDING_LIMIT = 50
+SNAPSHOT_TTL = 12 * 3600   # опрос остатков без ответа дольше — закрывается, и число снова пишется тратой
+UNDO_DEPTH = 20   # сколько последних записей бота можно отменить через /undo подряд
 PLAIN_AMOUNT_RE = re.compile(r"^(\d+(?:[.,]\d{1,2})?)(к|k)?(?:р|руб|₽|€|\$|eur|евро)?\.?$")
 
 
@@ -53,6 +56,7 @@ class SnapshotSession:
     previous: dict[str, BalanceEntry]
     position: int = 0
     purpose: str = "manual"           # "monthly" — опрос 1 числа, после него приходят итоги месяца
+    touched: float = field(default_factory=time.monotonic)   # последний ответ: забытый опрос закрывается сам
 
     def question(self) -> SnapshotQuestion | None:
         if self.position >= len(self.accounts):
@@ -134,6 +138,8 @@ class FinanceService:
 
     async def save(self, op: Operation) -> Operation:
         await self.storage.add_operation(op)
+        saved = [i for i in self.state.get("saved_op_ids", []) if i != op.id][-(UNDO_DEPTH - 1):]
+        self.state.set("saved_op_ids", [*saved, op.id])
         if is_heavy(op):
             try:
                 await self.storage.add_big_purchase(
@@ -196,10 +202,14 @@ class FinanceService:
         return op
 
     async def undo(self) -> Operation | None:
-        ops = await self.storage.list_operations()
-        if not ops:
-            return None
-        return await self.delete(ops[-1].id)
+        """Отменяет последнюю запись, сделанную ботом (строки, вписанные в таблицу руками, не трогает)."""
+        saved = list(self.state.get("saved_op_ids", []))
+        while saved:
+            op = await self.delete(saved.pop())
+            self.state.set("saved_op_ids", saved)
+            if op is not None:
+                return op
+        return None
 
     async def delete(self, op_id: str) -> Operation | None:
         op = await self.storage.delete_operation(op_id)
@@ -484,6 +494,10 @@ class FinanceService:
 
     def snapshot_question(self, user_id: int) -> SnapshotQuestion | None:
         session = self._snapshots.get(user_id)
+        if session is not None and time.monotonic() - session.touched > SNAPSHOT_TTL:
+            log.info("Опрос остатков пользователя %s закрыт: нет ответа %s ч", user_id, SNAPSHOT_TTL // 3600)
+            self._snapshots.pop(user_id, None)
+            return None
         return session.question() if session else None
 
     def cancel_snapshot(self, user_id: int) -> bool:
@@ -494,11 +508,12 @@ class FinanceService:
 
         Возвращает (опрос был активен, следующий вопрос или None, если опрос завершен).
         """
+        q = self.snapshot_question(user_id)
         session = self._snapshots.get(user_id)
-        q = session.question() if session else None
-        if q is None:
+        if q is None or session is None:
             self._snapshots.pop(user_id, None)
             return False, None
+        session.touched = time.monotonic()
         if amount is None and q.previous is not None:
             amount = q.previous.amount
         if amount is not None:

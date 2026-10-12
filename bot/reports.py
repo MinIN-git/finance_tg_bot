@@ -387,8 +387,9 @@ class CapitalSummary:
     prev_date: date | None = None
     prev_total: Decimal | None = None
     total_delta: Decimal | None = None
-    ops_month: date | None = None        # первое число месяца, за который считались операции
-    ops_balance: Decimal | None = None   # доход − траты за этот месяц (без переводов)
+    ops_start: date | None = None        # операции между снимками: с даты прошлого снимка
+    ops_end: date | None = None          # по день перед последним снимком (включительно)
+    ops_balance: Decimal | None = None   # доход − траты за эти дни (без переводов)
     dynamics: list[tuple[int, Decimal]] = field(default_factory=list)  # (месяцев, изменение итога)
 
     @property
@@ -426,10 +427,12 @@ def capital_summary(
         s.prev_total = sum(prev.values(), ZERO)
         s.total_delta = total - s.prev_total
 
-    month = add_months(last_date, -1)
-    month_sum = summarize_month(ops, month)
-    if month_sum.count:
-        s.ops_month, s.ops_balance = month_sum.start, month_sum.balance
+    if prev_date is not None:
+        # Изменение капитала между снимками сверяем с операциями ровно за эти дни:
+        # день снимка относится к следующему периоду (остаток спрашивается на утро).
+        between = summarize(ops, prev_date, last_date - timedelta(days=1))
+        if between.count:
+            s.ops_start, s.ops_end, s.ops_balance = between.start, between.end, between.balance
 
     for n in periods:
         target = shift_months(last_date, -n)
@@ -441,6 +444,13 @@ def capital_summary(
 
 def _on_date(d: date) -> str:
     return f"{d.day} {MONTHS_GENITIVE[d.month - 1]}"
+
+
+def ops_period(start: date, end: date) -> str:
+    """«за сентябрь», если период — ровно календарный месяц, иначе «с 5 октября по 31 октября»."""
+    if start == month_start(start) and end == month_end(start):
+        return f"за {MONTHS_NOMINATIVE[start.month - 1]}"
+    return f"с {_on_date(start)} по {_on_date(end)}"
 
 
 def safety_months(total: Decimal, ops: Sequence[Operation], today: date) -> Decimal | None:
@@ -466,7 +476,7 @@ def format_capital(
         delta = f" ({m(a.delta, True)})" if a.delta is not None else ""
         lines.append(f"• {html.escape(a.account)}: {m(a.amount)}{delta}")
     if s.ops_balance is not None:
-        lines.append(f"Доход − траты за {MONTHS_NOMINATIVE[s.ops_month.month - 1]}: {m(s.ops_balance, True)}")
+        lines.append(f"Доход − траты {ops_period(s.ops_start, s.ops_end)}: {m(s.ops_balance, True)}")
     if s.unaccounted is not None:
         lines.append(f"Не учтено: <b>{m(s.unaccounted, True)}</b> <i>(проценты, забытые траты)</i>")
     if s.dynamics:
@@ -856,12 +866,12 @@ def find_signals(
         ))
 
     c = capital_summary(balances, ops)
-    if c is not None and c.unaccounted is not None and c.ops_month is not None:
-        income = summarize_month(ops, c.ops_month).income
+    if c is not None and c.unaccounted is not None and c.ops_start is not None:
+        income = summarize(ops, c.ops_start, c.ops_end).income
         if income > 0 and abs(c.unaccounted) > income * RECONCILE_WARN_SHARE:
             out.append((
                 f"reconcile:{c.date.isoformat()}",
-                f"💼 Сверка за {MONTHS_NOMINATIVE[c.ops_month.month - 1]} не сходится на "
+                f"💼 Сверка {ops_period(c.ops_start, c.ops_end)} не сходится на "
                 f"{fmt_money(c.unaccounted, cur, signed=True)} — похоже, часть трат или доходов не записана.",
             ))
     return out

@@ -380,7 +380,8 @@ async def cmd_last(message: Message, svc: FinanceService) -> None:
 @router.message(Command("undo"))
 async def cmd_undo(message: Message, svc: FinanceService) -> None:
     op = await svc.undo()
-    await message.answer(f"Удалено: {svc.describe(op)}" if op else "Удалять нечего.")
+    await message.answer(f"Удалено: {svc.describe(op)}" if op else
+                         "Отменять нечего: /undo отменяет записи, сделанные ботом. Удалить любую — в /last.")
 
 
 @router.message(Command("refresh"))
@@ -418,16 +419,20 @@ def snapshot_question_view(q: SnapshotQuestion, cur: str) -> tuple[str, InlineKe
     return text, kb.as_markup()
 
 
-async def send_snapshot_step(message: Message, svc: FinanceService, nxt: SnapshotQuestion | None) -> None:
+async def send_snapshot_step(message: Message, svc: FinanceService, nxt: SnapshotQuestion | None, done: str = "") -> None:
+    """Следующий вопрос опроса (или итог); done — подтверждение только что записанного ответа."""
+    prefix = f"{done}\n\n" if done else ""
     if nxt is not None:
         text, kb = snapshot_question_view(nxt, svc.cur)
-        await message.answer(text, reply_markup=kb)
+        await message.answer(prefix + text, reply_markup=kb)
     elif svc.pop_finished_purpose(message.chat.id) == "monthly":
         from .notify import send_month_close
 
+        if done:
+            await message.answer(done)
         await send_month_close(message.bot, message.chat.id, svc)
     else:
-        await message.answer(await svc.capital_text())
+        await message.answer(prefix + await svc.capital_text())
 
 
 @router.callback_query(Snap.filter())
@@ -477,11 +482,13 @@ async def on_stats_view(call: CallbackQuery, callback_data: StatsView, svc: Fina
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message, svc: FinanceService) -> None:
     user_id = message.from_user.id
-    if svc.snapshot_question(user_id) is not None:
+    q = svc.snapshot_question(user_id)
+    if q is not None:
         amount = parse_plain_amount(message.text)
         if amount is not None:
             _, nxt = await svc.answer_snapshot(user_id, amount)
-            await send_snapshot_step(message, svc, nxt)
+            done = f"💼 Остаток «{html.escape(q.account.name)}»: {fmt_money(amount, svc.cur)}"
+            await send_snapshot_step(message, svc, nxt, done)
             return
 
     try:
@@ -509,6 +516,15 @@ async def on_text(message: Message, svc: FinanceService) -> None:
 STALE = "Эта операция устарела (бот перезапускался) — отправьте ее заново"
 
 
+async def save_or_restash(svc: FinanceService, op: Operation, choices: dict[OpType, str] | None = None) -> None:
+    """Запись операции, уже снятой из ожидающих: если таблица не ответила — вернуть ее, чтобы нажать еще раз."""
+    try:
+        await svc.save(op)
+    except Exception:
+        svc.stash(op, choices)
+        raise
+
+
 @router.callback_query(PickType.filter())
 async def on_pick_type(call: CallbackQuery, callback_data: PickType, svc: FinanceService) -> None:
     op = svc.get_pending(callback_data.pid)
@@ -516,10 +532,10 @@ async def on_pick_type(call: CallbackQuery, callback_data: PickType, svc: Financ
     if op is None or not choices:
         await call.answer(STALE, show_alert=True)
         return
+    svc.pop_pending(callback_data.pid)   # до записи: повторный тап не запишет операцию второй раз
     op.type = OpType.INCOME if callback_data.income else OpType.EXPENSE
     op.category = choices[op.type]
-    await svc.save(op)
-    svc.pop_pending(callback_data.pid)
+    await save_or_restash(svc, op, choices)
     await call.message.edit_text(f"✅ {svc.describe(op)}", reply_markup=await saved_kb(svc, op))
     await call.answer()
 
@@ -545,9 +561,11 @@ async def on_pick_category(call: CallbackQuery, callback_data: PickCat, svc: Fin
     if not 0 <= callback_data.idx < len(cats):
         await call.answer("Список категорий изменился — отправьте заново", show_alert=True)
         return
+    if svc.pop_pending(callback_data.pid) is None:   # до записи: повторный тап уже ее забрал
+        await call.answer()
+        return
     op.category = cats[callback_data.idx].name
-    await svc.save(op)
-    svc.pop_pending(callback_data.pid)
+    await save_or_restash(svc, op)
     learned = await svc.learn(op)
     text = f"✅ {svc.describe(op)}"
     if learned:

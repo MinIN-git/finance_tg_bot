@@ -166,7 +166,8 @@ def test_monthly_snapshot_ends_with_month_close(h):
     out = []
     for _ in range(q.total):
         out = h.text("1000")
-    assert "📊" in texts(out)[0] and "Потрачено" in texts(out)[0]
+    assert texts(out)[0].startswith("💼 Остаток «")       # подтверждение последнего ответа
+    assert any("📊" in t and "Потрачено" in t for t in texts(out))
     assert h.svc.state.month_closed("2026-10")
     # обычный /snapshot заканчивается сводкой /capital
     h.text("/snapshot")
@@ -250,3 +251,17 @@ def test_stats_period_argument(h):
     assert "Апрель – сентябрь" in texts(out)[-1]
     out = h.text("/stats 5")
     assert "3, 6 или 12" in texts(out)[0]
+
+
+def test_forgotten_snapshot_expires_and_number_is_expense(h, monkeypatch):
+    import time
+    from bot import service
+
+    h.text("/snapshot")
+    out = h.text("500")
+    assert texts(out)[0].startswith("💼 Остаток «Карта»: 500")
+    later = time.monotonic() + service.SNAPSHOT_TTL + 1
+    monkeypatch.setattr(service.time, "monotonic", lambda: later)
+    h.text("700")                 # опрос забыт — число снова идет в траты (без слова — выбор категории)
+    assert h.svc.snapshot_question(1) is None
+    assert all(o.amount != 700 for o in asyncio.run(h.svc.storage.list_balances()))

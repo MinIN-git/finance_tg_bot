@@ -188,6 +188,28 @@ def test_manual_rows_with_strings(storage):
     assert [(o.date, o.amount, o.type) for o in ops] == [(date(2026, 9, 1), Decimal("1200.50"), OpType.EXPENSE)]
 
 
+def test_manual_rows_without_id_get_id(storage):
+    """Строки, вписанные руками без id: бот вписывает id, и правка одной не задевает другую."""
+    ws = storage._sh.sheets["Операции"]
+    ws.rows.append(["01.09.2026", "расход", 100, "Досуг", "Карта", "", "кино"])
+    ws.rows.append(["02.09.2026", "расход", 200, "Досуг", "Карта", "", "театр"])
+    first, second = run(storage.list_operations())
+    assert first.id and second.id and first.id != second.id
+    assert [r[8] for r in ws.rows[1:]] == [first.id, second.id]
+
+    assert run(storage.update_operation(Operation(**{**first.__dict__, "category": "Подарки"})))
+    assert [r[3] for r in ws.rows[1:]] == ["Подарки", "Досуг"]
+    assert run(storage.delete_operation(second.id)).comment == "театр"
+    assert [r[6] for r in ws.rows[1:]] == ["кино"]
+
+
+def test_empty_id_never_matches(storage):
+    ws = storage._sh.sheets["Операции"]
+    ws.rows.append(["01.09.2026", "расход", 100, "Досуг", "Карта", "", "кино", "", ""])
+    assert run(storage.delete_operation("")) is None
+    assert not run(storage.update_operation(Operation(date(2026, 9, 1), OpType.EXPENSE, Decimal(1), id="")))
+
+
 def test_batch_add_and_delete(storage):
     ops = [Operation(date(2026, 9, 30), OpType.EXPENSE, Decimal(i + 1), "Досуг", "Карта", tags=["импорт"]) for i in range(5)]
     run(storage.add_operations(ops))
@@ -321,6 +343,33 @@ def test_retry_on_429(storage):
     assert slept == [5, 10, 20, 40, 60]
     with pytest.raises(APIError):     # другие ошибки — без повторов
         storage.call(lambda: (_ for _ in ()).throw(APIError(_Resp(403))))
+
+
+def test_retry_only_when_request_not_sent(storage):
+    import requests
+    from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
+
+    slept, calls = [], {"n": 0}
+    storage._sleep = slept.append
+    dns = requests.exceptions.ConnectionError(MaxRetryError(None, "/x", reason=NewConnectionError(None, "dns")))
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise dns
+        return "ok"
+
+    assert storage.call(flaky) == "ok" and slept == [2, 5]
+    slept.clear()
+    with pytest.raises(requests.exceptions.ConnectionError):
+        storage.call(lambda: (_ for _ in ()).throw(dns))
+    assert slept == [2, 5, 10]
+    # оборвалось после отправки — повтор мог бы записать строку дважды, поэтому без повтора
+    slept.clear()
+    reset = requests.exceptions.ConnectionError(ProtocolError("Connection aborted"))
+    with pytest.raises(requests.exceptions.ConnectionError):
+        storage.call(lambda: (_ for _ in ()).throw(reset))
+    assert slept == []
 
 
 def test_update_operations_batch_without_rereading(storage):

@@ -13,7 +13,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .categories import DEFAULT_CATEGORIES
-from .models import Account, BalanceEntry, BigPurchase, Category, Kind, Operation, OpType, Trip, kind_from_tags
+from .models import (
+    Account, BalanceEntry, BigPurchase, Category, Kind, Operation, OpType, Trip, kind_from_tags, new_op_id,
+)
 
 log = logging.getLogger(__name__)
 
@@ -381,6 +383,19 @@ def parse_big_purchases(formatted: list[list[Any]], raw: list[list[Any]]) -> lis
     return out
 
 
+def _not_sent(e: BaseException) -> bool:
+    """Запрос не ушел в Google: не разрешилось имя или не установилось соединение."""
+    import requests
+    from urllib3.exceptions import NewConnectionError   # в т.ч. NameResolutionError
+
+    if isinstance(e, requests.exceptions.ConnectTimeout):
+        return True
+    if not isinstance(e, requests.exceptions.ConnectionError):
+        return False
+    reason = getattr(e.args[0], "reason", None) if e.args else None
+    return isinstance(reason, NewConnectionError)
+
+
 class SheetsStorage(Storage):
     """Google Sheets как источник истины + кэш в памяти с TTL.
 
@@ -488,18 +503,31 @@ class SheetsStorage(Storage):
 
     RETRY_DELAYS = (5, 10, 20, 40, 60)   # паузы при 429 (квота Google Sheets на запросы в минуту)
 
+    NETWORK_RETRY_DELAYS = (2, 5, 10)   # паузы, если до Google не удалось даже подключиться (DNS, соединение)
+
     def call(self, fn, *args, **kwargs):
-        """Синхронный вызов gspread с повтором при 429 «Quota exceeded»: 5, 10, 20, 40, 60 с."""
+        """Синхронный вызов gspread с повтором при 429 «Quota exceeded» (5, 10, 20, 40, 60 с) и при сбое
+        подключения (2, 5, 10 с). Повторяется только то, что точно не дошло до Google, — без риска записать дважды."""
         from gspread.exceptions import APIError
 
-        for attempt, delay in enumerate((*self.RETRY_DELAYS, None)):
+        quota = iter(self.RETRY_DELAYS)
+        network = iter(self.NETWORK_RETRY_DELAYS)
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 return fn(*args, **kwargs)
             except APIError as e:
-                if getattr(e, "code", None) != 429 or delay is None:
+                delay = next(quota, None) if getattr(e, "code", None) == 429 else None
+                if delay is None:
                     raise
-                log.warning("Google Sheets: превышена квота (429), повтор через %s с (попытка %s)", delay, attempt + 1)
-                self._sleep(delay)
+                log.warning("Google Sheets: превышена квота (429), повтор через %s с (попытка %s)", delay, attempt)
+            except Exception as e:
+                delay = next(network, None) if _not_sent(e) else None
+                if delay is None:
+                    raise
+                log.warning("Google Sheets: не удалось подключиться (%s), повтор через %s с", type(e).__name__, delay)
+            self._sleep(delay)
 
     async def _run(self, fn, *args, **kwargs):
         return await asyncio.to_thread(self.call, fn, *args, **kwargs)
@@ -509,10 +537,28 @@ class SheetsStorage(Storage):
     async def _ensure_ops(self) -> list[Operation]:
         if self._ops is None or time.monotonic() - self._ops_loaded_at > self._ttl:
             rows = await self._run(self._read, SHEET_OPERATIONS)
-            ops = [op for op in (row_to_op(r) for r in rows) if op is not None]
+            ops, missing = [], []
+            for i, r in enumerate(rows):
+                op = row_to_op(r)
+                if op is None:
+                    continue
+                if not op.id:   # строка вписана в таблицу руками: без id ее нельзя найти для правки и удаления
+                    op.id = new_op_id()
+                    missing.append((i + 2, op.id))   # +1 за заголовок, +1 — строки с 1
+                ops.append(op)
+            if missing:
+                await self._write_ids(missing)
             self._ops = ops
             self._ops_loaded_at = time.monotonic()
         return self._ops
+
+    async def _write_ids(self, missing: list[tuple[int, str]]) -> None:
+        data = [{"range": f"I{row}", "values": [[text_for_sheet(op_id)]]} for row, op_id in missing]
+        try:
+            await self._run(self._ws(SHEET_OPERATIONS).batch_update, data, value_input_option="USER_ENTERED")
+            log.info("Вписал id в %s строк листа «%s», добавленных вручную", len(missing), SHEET_OPERATIONS)
+        except Exception:
+            log.warning("Не удалось вписать id в строки, добавленные вручную", exc_info=True)
 
     async def list_operations(self) -> list[Operation]:
         async with self._lock:
@@ -540,7 +586,7 @@ class SheetsStorage(Storage):
             ws = self._ws(SHEET_OPERATIONS)
             ids = await self._run(ws.col_values, 9)
             wanted = set(op_ids)
-            rows = [i + 1 for i, v in enumerate(ids) if i > 0 and v in wanted]
+            rows = [i + 1 for i, v in enumerate(ids) if i > 0 and v and v in wanted]
             if rows:
                 # снизу вверх, чтобы номера строк не сдвигались
                 requests = [
@@ -566,6 +612,8 @@ class SheetsStorage(Storage):
         return formatted, raw
 
     def _find_row(self, op_id: str) -> int | None:
+        if not op_id:
+            return None
         ids = self._ws(SHEET_OPERATIONS).col_values(9)
         for idx in range(len(ids) - 1, 0, -1):
             if ids[idx] == op_id:
@@ -582,7 +630,7 @@ class SheetsStorage(Storage):
         async with self._lock:
             ws = self._ws(SHEET_OPERATIONS)
             ids = await self._run(ws.col_values, 9)
-            row_of = {v: i + 1 for i, v in enumerate(ids) if i > 0}
+            row_of = {v: i + 1 for i, v in enumerate(ids) if i > 0 and v}
             data = [{"range": f"A{row_of[op.id]}:K{row_of[op.id]}", "values": [op_to_row(op)]}
                     for op in ops if op.id in row_of]
             if data:
