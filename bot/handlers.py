@@ -25,7 +25,6 @@ router = Router(name="finance")
 HELP = """<b>✍️ Записать</b> — просто сообщением
 <code>350 кофе</code> — расход · <code>+150000 зп</code> — доход
 <code>вчера 1200 такси</code>, <code>5.10 800 аптека</code> — с датой
-<code>2000 продукты @наличные</code> — с другого счета
 <code>5000 Карта -> Вклад</code> — перевод между счетами
 <code>283000 отпуск #тяжелое</code> — тяжелая трата: в статистике считается отдельно
 <code>1000 здоровье, сходил к врачу</code> — после запятой просто комментарий
@@ -33,13 +32,12 @@ HELP = """<b>✍️ Записать</b> — просто сообщением
 Под записью: ↩️ отменить · 🏷 категория · ✏️ сумма
 
 <b>📅 Сейчас</b>
-/month — текущий месяц · /week — неделя
+/month — текущий месяц
 /last — последние записи · /undo — отменить последнюю
 
 <b>📊 Отчеты</b> — траты делятся на обычные, 🧾 тяжелые и ✈️ командировки
 /report — статистика прошлого месяца (приходит сама 1 числа)
 /stats 3, 6 или 12 — графики и тенденции по обычным тратам
-/compare август сентябрь — два месяца рядом
 /cat продукты — одна категория · /big — тяжелые траты за год
 «Обычно» — медиана за 6 месяцев; ▲/▼ — только если вышло за привычные пределы
 
@@ -68,6 +66,10 @@ class PickType(CallbackData, prefix="pt"):
 class ChangeCat(CallbackData, prefix="cc"):
     op_id: str
     idx: int  # -1 — показать список
+
+
+class CatReport(CallbackData, prefix="cr"):
+    op_id: str
 
 
 class EditAmount(CallbackData, prefix="ea"):
@@ -225,6 +227,8 @@ def saved_keyboard(op: Operation, trip=None, in_trip: bool = False) -> InlineKey
     if op.type != OpType.TRANSFER:
         kb.button(text="🏷 Категория", callback_data=ChangeCat(op_id=op.id, idx=-1))
     kb.button(text="✏️ Сумма", callback_data=EditAmount(op_id=op.id))
+    if op.type != OpType.TRANSFER and op.category:
+        kb.button(text=f"📊 {op.category}"[:40], callback_data=CatReport(op_id=op.id))
     if trip is not None:
         if in_trip:
             kb.button(text=f"🧳 Статья: {op.trip_item}" if op.trip_item else "🧳 Статья",
@@ -268,11 +272,6 @@ async def cmd_month(message: Message, svc: FinanceService) -> None:
     await message.answer(await svc.month_text(), reply_markup=month_keyboard("main"))
 
 
-@router.message(Command("week"))
-async def cmd_week(message: Message, svc: FinanceService) -> None:
-    await message.answer(await svc.week_text())
-
-
 @router.message(Command("report"))
 async def cmd_report(message: Message, svc: FinanceService) -> None:
     month = reports.add_months(svc.today(), -1)
@@ -286,11 +285,6 @@ async def cmd_cat(message: Message, command: CommandObject, svc: FinanceService)
         await message.answer("Укажите категорию: <code>/cat продукты</code>. Список: /categories")
         return
     await message.answer(await svc.category_text(command.args))
-
-
-@router.message(Command("compare", "сравнить"))
-async def cmd_compare(message: Message, command: CommandObject, svc: FinanceService) -> None:
-    await message.answer(await svc.compare_text(command.args))
 
 
 @router.message(Command("big", "крупные"))
@@ -317,9 +311,10 @@ async def cmd_signals(message: Message, command: CommandObject, svc: FinanceServ
     elif arg in ("off", "выкл"):
         svc.state.set("signals_enabled", False)
     enabled = svc.state.get("signals_enabled", True)
-    text = ("🔔 Сигналы включены: не чаще раза в неделю бот напомнит, если категория к 20-му числу "
-            "превысила свое обычное за месяц, «Прочее» больше 10% расходов или не сошлась сверка капитала. "
-            "Выключить: /signals off") if enabled else "🔕 Сигналы выключены. Включить: /signals on"
+    text = ("🔔 Сигналы включены. В 20:00 бот напомнит, если 3 дня ничего не записано, а не чаще раза "
+            "в неделю — если категория к 20-му числу превысила свое обычное за месяц, «Прочее» больше 10% "
+            "расходов или не сошлась сверка капитала. Выключить: /signals off"
+            ) if enabled else "🔕 Сигналы и напоминания выключены. Включить: /signals on"
     if enabled and arg not in ("on", "вкл"):
         current = await svc.signals()
         if current:
@@ -618,6 +613,16 @@ async def on_change_category(call: CallbackQuery, callback_data: ChangeCat, svc:
         text += f"\n🧠 Запомнил: «{html.escape(learned)}» → {html.escape(updated.category)}"
     await call.message.edit_text(text, reply_markup=await saved_kb(svc, updated))
     await call.answer("Категория изменена")
+
+
+@router.callback_query(CatReport.filter())
+async def on_cat_report(call: CallbackQuery, callback_data: CatReport, svc: FinanceService) -> None:
+    text = await svc.category_text_for(callback_data.op_id)
+    if text is None:
+        await call.answer("Операция не найдена", show_alert=True)
+        return
+    await call.message.answer(text)
+    await call.answer()
 
 
 @router.callback_query(EditAmount.filter())

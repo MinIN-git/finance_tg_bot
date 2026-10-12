@@ -186,7 +186,6 @@ def test_fallback_job_sends_once(h):
 
 
 def test_russian_aliases(h):
-    assert "⚖️" in texts(h.text("/сравнить август сентябрь"))[0]
     assert "🧾" in texts(h.text("/крупные"))[0]
     assert "💼" in texts(h.text("/деньги"))[0]
 
@@ -279,3 +278,11 @@ def test_edit_amount_button(h):
     h.click(buttons(out)["✏️ Сумма"])
     h.text("200 такси")                     # передумал: записалась новая трата, старая не тронута
     assert [o.amount for o in ops(h)] == [530, 200]
+
+
+def test_category_button_under_saved_entry(h):
+    h.text("200 кофе")
+    out = h.text("350 кофе")
+    out = h.click(buttons(out)["📊 Еда вне дома"])
+    text = texts(out)[0]
+    assert "Еда вне дома" in text and "Итого: <b>550</b>" in text

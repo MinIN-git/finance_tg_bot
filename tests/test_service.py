@@ -269,3 +269,17 @@ def test_idle_reminder_falls_back_to_last_op_date(svc):
     from datetime import datetime
     run(svc.storage.add_operation(Operation(date(2026, 10, 1), OpType.EXPENSE, Decimal(1), "Досуг")))
     assert run(svc.last_activity()) == datetime(2026, 10, 1, 12, tzinfo=svc.tz)
+
+
+def test_idle_reminder_off_with_signals(svc):
+    from datetime import datetime, timedelta
+    from bot.notify import send_idle_reminder
+
+    class Bot:
+        async def send_message(self, chat_id, text):
+            raise AssertionError("не должно отправляться")
+
+    run(svc.save(run(svc.prepare("350 кофе")).op))
+    svc.state.set("signals_enabled", False)
+    saved = datetime.fromisoformat(svc.state.get("last_saved_at"))
+    assert not run(send_idle_reminder(Bot(), [1], svc, saved + timedelta(days=5)))

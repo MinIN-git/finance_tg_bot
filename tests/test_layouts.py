@@ -212,15 +212,12 @@ def test_stats_chart_many_tiles():
     assert stats_chart(st, "тест")[:4] == b"\x89PNG"
 
 
-# ---------- /cat, /compare, сигналы — та же «обычно» ----------
+# ---------- /cat, сигналы — та же «обычно» ----------
 
-def test_cat_and_compare_use_median():
+def test_cat_uses_median():
     s = svc(stats_ops(), date(2026, 10, 6))
     cat = run(s.category_text("транспорт"))
     assert "Обычно (медиана): <b>8" in cat and "Прошлые месяцы</b> (обычные траты)" in cat
-    cmp = run(s.compare_text("август сентябрь"))
-    assert f"🚆 Транспорт/РЖД: 9{NB}500 → 24{NB}000 ▲" in cmp
-    assert f"🛒 Продукты домой: 30{NB}000 → 30{NB}000" in cmp and "Досуг" not in cmp
 
 
 def test_signals_use_median_and_regular_only():

@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from bot import reports
-from bot.models import BigPurchase, Operation, OpType
+from bot.models import Operation, OpType
 from bot.service import FinanceService
 from bot.storage import MemoryStorage
 
@@ -27,7 +27,6 @@ def test_heavy_tag_on_input_is_heavy_kind():
     run(svc.save(p.op))
     assert run(svc.get_operation(p.op.id)).kind.value == "тяжелая"
     assert "🧾 тяжелая трата" in svc.describe(p.op) and "#тяжелое" not in svc.describe(p.op)
-    assert run(svc.storage.list_big_purchases()) == []   # лист «Большие покупки» бот больше не ведет
 
 
 def test_summarize_clean_only_regular():

@@ -69,15 +69,6 @@ def parse_amount(token: str) -> tuple[str | None, Decimal] | None:
     return m.group("sign"), value
 
 
-def find_account(query: str, accounts: Sequence[str]) -> str | None:
-    q = normalize(query)
-    for acc in accounts:
-        if normalize(acc) == q:
-            return acc
-    matches = [acc for acc in accounts if normalize(acc).startswith(q)]
-    return matches[0] if len(matches) == 1 else None
-
-
 def _take_account_suffix(text: str, accounts: Sequence[str]) -> tuple[str | None, str]:
     low = normalize(text)
     for acc in sorted(accounts, key=len, reverse=True):
@@ -125,11 +116,6 @@ def parse_message(text: str, today: date, accounts: Sequence[str] = ()) -> Parse
     for token in text.split():
         if token.startswith("#") and len(token) > 1:
             tags.append(normalize(token[1:]))
-            continue
-        if token.startswith("@") and len(token) > 1 and not is_transfer:
-            account = find_account(token[1:], accounts)
-            if account is None:
-                raise ParseError(f"Не знаю счет «{token[1:]}». Счета: {', '.join(accounts) or '—'}")
             continue
         if op_date is None:
             d = parse_date(token, today)

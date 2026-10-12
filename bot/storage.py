@@ -6,7 +6,6 @@ import copy
 import logging
 import re
 import time
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -14,7 +13,7 @@ from typing import Any
 
 from .categories import DEFAULT_CATEGORIES
 from .models import (
-    Account, BalanceEntry, BigPurchase, Category, Kind, Operation, OpType, Trip, kind_from_tags, new_op_id,
+    Account, BalanceEntry, Category, Kind, Operation, OpType, Trip, kind_from_tags, new_op_id,
 )
 
 log = logging.getLogger(__name__)
@@ -29,7 +28,6 @@ SHEET_OPERATIONS = "Операции"
 SHEET_ACCOUNTS = "Счета"
 SHEET_CATEGORIES = "Категории"
 SHEET_BALANCES = "Остатки"
-SHEET_BIG = "Большие покупки"
 SHEET_TRIPS = "Поездки"
 
 HEADERS = {
@@ -61,14 +59,6 @@ class Storage(ABC):
         for op in ops:
             await self.add_operation(op)
 
-    async def delete_operations(self, op_ids: list[str]) -> int:
-        """Пакетное удаление; возвращает число удаленных."""
-        deleted = 0
-        for op_id in op_ids:
-            if await self.delete_operation(op_id) is not None:
-                deleted += 1
-        return deleted
-
     @abstractmethod
     async def list_categories(self) -> list[Category]: ...
 
@@ -87,25 +77,8 @@ class Storage(ABC):
     async def add_balance(self, entry: BalanceEntry) -> None:
         """Добавляет остаток; запись за ту же дату и тот же счет заменяется."""
 
-    async def list_big_purchases(self) -> list[BigPurchase]:
-        """Разовые крупные траты (лист «Большие покупки»)."""
-        return []
-
-    async def add_big_purchase(self, item: BigPurchase) -> None:
-        """Дописать строку в «Большие покупки»."""
-
     async def list_trips(self) -> list[Trip]:
         return []
-
-    async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
-        """Вписать категорию и id операции в существующую строку «Больших покупок» (без id)."""
-        raise NotImplementedError
-
-    async def link_big_purchases(self, links: list[tuple[BigPurchase, str, str]]) -> int:
-        n = 0
-        for item, op_id, category in links:
-            n += await self.link_big_purchase(item, op_id, category)
-        return n
 
     async def update_operations(self, ops: list[Operation]) -> int:
         n = 0
@@ -113,21 +86,11 @@ class Storage(ABC):
             n += await self.update_operation(op)
         return n
 
-    async def read_sheet(self, title: str) -> tuple[list[list[Any]], list[list[Any]]] | None:
-        """Произвольный лист: (отформатированные значения, «сырые»); None — листа нет."""
-        return None
-
     async def add_trip(self, trip: Trip) -> None:
         raise NotImplementedError
 
     async def delete_trip(self, trip_id: str) -> None:
         raise NotImplementedError
-
-    async def delete_big_purchase(self, op_id: str) -> None:
-        """Убрать строку, которую бот дописал для операции op_id."""
-
-    async def set_big_purchase_category(self, op_id: str, category: str) -> None:
-        """Поменять категорию у строки операции op_id."""
 
     async def refresh(self) -> None:
         """Сбросить кэш (если он есть)."""
@@ -140,17 +103,13 @@ class MemoryStorage(Storage):
         categories: list[Category] | None = None,
         accounts: list[Account] | None = None,
         balances: list[BalanceEntry] | None = None,
-        big_purchases: list[BigPurchase] | None = None,
         trips: list[Trip] | None = None,
-        sheets: dict[str, tuple[list[list[Any]], list[list[Any]]]] | None = None,
     ) -> None:
         self.operations = list(operations or [])
         self.categories = copy.deepcopy(categories if categories is not None else DEFAULT_CATEGORIES)
         self.accounts = copy.deepcopy(accounts if accounts is not None else DEFAULT_ACCOUNTS)
         self.balances = list(balances or [])
-        self.big_purchases = list(big_purchases or [])
         self.trips = list(trips or [])
-        self.sheets = dict(sheets or {})
 
     async def list_operations(self) -> list[Operation]:
         return list(self.operations)
@@ -190,38 +149,14 @@ class MemoryStorage(Storage):
     async def list_balances(self) -> list[BalanceEntry]:
         return list(self.balances)
 
-    async def list_big_purchases(self) -> list[BigPurchase]:
-        return list(self.big_purchases)
-
-    async def add_big_purchase(self, item: BigPurchase) -> None:
-        self.big_purchases.append(item)
-
     async def list_trips(self) -> list[Trip]:
         return list(self.trips)
-
-    async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
-        for b in self.big_purchases:
-            if not b.op_id and (b.date, b.amount, b.what) == (item.date, item.amount, item.what):
-                b.op_id, b.category = op_id, category
-                return True
-        return False
-
-    async def read_sheet(self, title: str):
-        return self.sheets.get(title)
 
     async def add_trip(self, trip: Trip) -> None:
         self.trips.append(trip)
 
     async def delete_trip(self, trip_id: str) -> None:
         self.trips = [t for t in self.trips if t.id != trip_id]
-
-    async def delete_big_purchase(self, op_id: str) -> None:
-        self.big_purchases = [b for b in self.big_purchases if not (op_id and b.op_id == op_id)]
-
-    async def set_big_purchase_category(self, op_id: str, category: str) -> None:
-        for b in self.big_purchases:
-            if op_id and b.op_id == op_id:
-                b.category = category
 
     async def add_balance(self, entry: BalanceEntry) -> None:
         self.balances = [
@@ -308,78 +243,6 @@ def row_to_op(row: list[Any]) -> Operation | None:
         account=str(row[4]).strip(), to_account=str(row[5]).strip(), comment=str(row[6]).strip(),
         tags=tags, id=str(row[8]).strip(), kind=kind, trip_item=str(row[10]).strip(),
     )
-
-
-def _col_letter(col: int) -> str:
-    letters = ""
-    col += 1
-    while col:
-        col, rem = divmod(col - 1, 26)
-        letters = chr(65 + rem) + letters
-    return letters
-
-
-def _month_cell(value: Any) -> date | None:
-    """«09.2026» / «сентябрь 2026» нет — только дата или «мм.гггг»."""
-    m = re.fullmatch(r"(\d{1,2})\.(\d{4})", str(value).strip())
-    if m and 1 <= int(m.group(1)) <= 12:
-        return date(int(m.group(2)), int(m.group(1)), 1)
-    return None
-
-
-@dataclass
-class BigLayout:
-    """Где на листе «Большие покупки» строка заголовка и нужные колонки (индексы с 0)."""
-    header: int
-    date_col: int
-    cost_col: int
-    what_col: int | None
-    cat_col: int | None
-    id_col: int | None
-    width: int
-
-
-def _norm_cell(v: Any) -> str:
-    return str(v).strip().lower().replace("ё", "е")
-
-
-def find_big_layout(formatted: list[list[Any]]) -> BigLayout | None:
-    for r, row in enumerate(formatted):
-        cells = [_norm_cell(v) for v in row]
-        d = next((i for i, v in enumerate(cells) if v.startswith("дата")), None)
-        c = next((i for i, v in enumerate(cells) if v.startswith(("стоимост", "сумма", "цена"))), None)
-        if d is None or c is None:
-            continue
-        what = next((i for i, v in enumerate(cells) if i not in (d, c) and v.startswith(("что", "покуп", "назван", "описан"))), None)
-        cat = next((i for i, v in enumerate(cells) if v.startswith("категор")), None)
-        oid = next((i for i, v in enumerate(cells) if v == "id"), None)
-        width = max((i + 1 for i, v in enumerate(cells) if v), default=0)
-        return BigLayout(r, d, c, what, cat, oid, width)
-    return None
-
-
-def parse_big_purchases(formatted: list[list[Any]], raw: list[list[Any]]) -> list[BigPurchase]:
-    """Лист «Большие покупки»: строка заголовка с «Дата» и «Стоимость» (или «Сумма»), колонки
-    «Что купил»/«Покупка», «Категория» и служебная «id» необязательны; читает строки ниже."""
-    lay = find_big_layout(formatted)
-    if lay is None:
-        return []
-    out = []
-    for r in range(lay.header + 1, len(formatted)):
-        def cell(grid, c):
-            row = grid[r] if r < len(grid) else []
-            return row[c] if c is not None and c < len(row) else ""
-        d = cell(raw, lay.date_col)
-        when = cell_to_date(d) if str(d).strip() else None
-        when = when or _month_cell(cell(formatted, lay.date_col)) or cell_to_date(cell(formatted, lay.date_col))
-        amount = cell_to_decimal(cell(raw, lay.cost_col)) if str(cell(raw, lay.cost_col)).strip() else None
-        if when is None or amount is None or amount <= 0:
-            continue
-        out.append(BigPurchase(
-            when, str(cell(formatted, lay.what_col)).strip(), amount,
-            str(cell(formatted, lay.cat_col)).strip(), str(cell(formatted, lay.id_col)).strip(),
-        ))
-    return out
 
 
 def _not_sent(e: BaseException) -> bool:
@@ -577,38 +440,6 @@ class SheetsStorage(Storage):
             if self._ops is not None:
                 self._ops.extend(ops)
 
-    async def delete_operations(self, op_ids: list[str]) -> int:
-        if not op_ids:
-            return 0
-        async with self._lock:
-            ws = self._ws(SHEET_OPERATIONS)
-            ids = await self._run(ws.col_values, 9)
-            wanted = set(op_ids)
-            rows = [i + 1 for i, v in enumerate(ids) if i > 0 and v and v in wanted]
-            if rows:
-                # снизу вверх, чтобы номера строк не сдвигались
-                requests = [
-                    {"deleteDimension": {"range": {
-                        "sheetId": ws.id, "dimension": "ROWS", "startIndex": r - 1, "endIndex": r,
-                    }}}
-                    for r in sorted(rows, reverse=True)
-                ]
-                await self._run(self._sh.batch_update, {"requests": requests})
-            self._ops = None
-            return len(rows)
-
-    def read_grid(self, title: str) -> tuple[list[list[Any]], list[list[Any]]]:
-        """Произвольный лист целиком: (отформатированные значения, «сырые» значения)."""
-        from gspread.utils import DateTimeOption, ValueRenderOption
-
-        ws = self._ws(title)
-        formatted = ws.get_all_values()
-        raw = ws.get_all_values(
-            value_render_option=ValueRenderOption.unformatted,
-            date_time_render_option=DateTimeOption.serial_number,
-        )
-        return formatted, raw
-
     def _find_row(self, op_id: str) -> int | None:
         if not op_id:
             return None
@@ -718,119 +549,6 @@ class SheetsStorage(Storage):
                     await self._run(ws.update, [row], f"A{idx}:C{idx}", value_input_option="USER_ENTERED")
                     return
             await self._run(ws.append_row, row, value_input_option="USER_ENTERED", table_range="A1")
-
-    # ----- большие покупки -----
-
-    async def list_big_purchases(self) -> list[BigPurchase]:
-        try:
-            formatted, raw = await self._run(self.read_grid, SHEET_BIG)
-        except Exception:
-            log.warning("Не удалось прочитать лист «%s»", SHEET_BIG, exc_info=True)
-            return []
-        return parse_big_purchases(formatted, raw)
-
-    def _big_layout(self) -> BigLayout | None:
-        """Раскладка листа; при необходимости дописывает колонки «Категория» и «id» в заголовок."""
-        ws = self._ws(SHEET_BIG)
-        lay = find_big_layout(ws.get_all_values())
-        if lay is None:
-            return None
-        missing = [(name, attr) for name, attr in (("Категория", "cat_col"), ("id", "id_col")) if getattr(lay, attr) is None]
-        if missing:
-            col = lay.width
-            if ws.col_count < col + len(missing):
-                ws.add_cols(col + len(missing) - ws.col_count)
-            for name, attr in missing:
-                log.info("Добавляю колонку «%s» в лист «%s»", name, SHEET_BIG)
-                ws.update([[name]], f"{_col_letter(col)}{lay.header + 1}", value_input_option="RAW")
-                setattr(lay, attr, col)
-                col += 1
-            lay.width = col
-        return lay
-
-    def ensure_big_columns(self) -> None:
-        try:
-            self._big_layout()
-        except Exception:
-            log.warning("Не удалось подготовить лист «%s»", SHEET_BIG, exc_info=True)
-
-    async def add_big_purchase(self, item: BigPurchase) -> None:
-        async with self._lock:
-            lay = await self._run(self._big_layout)
-            if lay is None:
-                raise RuntimeError(f"На листе «{SHEET_BIG}» не найден заголовок (Дата, Что купил, Стоимость)")
-            row: list[Any] = [""] * lay.width
-            row[lay.date_col] = item.date.isoformat()
-            row[lay.cost_col] = number_for_sheet(item.amount)
-            if lay.what_col is not None:
-                row[lay.what_col] = text_for_sheet(item.what)
-            row[lay.cat_col] = text_for_sheet(item.category)
-            row[lay.id_col] = text_for_sheet(item.op_id)
-            await self._run(
-                self._ws(SHEET_BIG).append_row, row,
-                value_input_option="USER_ENTERED", table_range=f"A{lay.header + 1}",
-            )
-
-    def _big_row(self, op_id: str) -> tuple[BigLayout, int] | tuple[None, None]:
-        lay = self._big_layout()
-        if lay is None or not op_id:
-            return None, None
-        ids = self._ws(SHEET_BIG).col_values(lay.id_col + 1)
-        for idx in range(len(ids) - 1, lay.header, -1):
-            if ids[idx] == op_id:
-                return lay, idx + 1
-        return None, None
-
-    async def link_big_purchase(self, item: BigPurchase, op_id: str, category: str) -> bool:
-        return await self.link_big_purchases([(item, op_id, category)]) == 1
-
-    async def link_big_purchases(self, links: list[tuple[BigPurchase, str, str]]) -> int:
-        """Вписать категорию и id операции в строки без id: одно чтение листа и одна пакетная запись."""
-        if not links:
-            return 0
-        async with self._lock:
-            lay = await self._run(self._big_layout)
-            if lay is None:
-                return 0
-            formatted, raw = await self._run(self.read_grid, SHEET_BIG)
-            pending = list(links)
-            data = []
-            for r in range(lay.header + 1, len(formatted)):
-                found = parse_big_purchases([formatted[lay.header], formatted[r]], [raw[lay.header], raw[r]])
-                if not found or found[0].op_id:
-                    continue
-                key = (found[0].date, found[0].amount, found[0].what)
-                match = next((x for x in pending if (x[0].date, x[0].amount, x[0].what) == key), None)
-                if match is None:
-                    continue
-                pending.remove(match)
-                data.append({"range": f"{_col_letter(lay.cat_col)}{r + 1}", "values": [[text_for_sheet(match[2])]]})
-                data.append({"range": f"{_col_letter(lay.id_col)}{r + 1}", "values": [[text_for_sheet(match[1])]]})
-            if data:
-                await self._run(self._ws(SHEET_BIG).batch_update, data, value_input_option="USER_ENTERED")
-            return len(data) // 2
-
-    async def read_sheet(self, title: str):
-        try:
-            return await self._run(self.read_grid, title)
-        except Exception:
-            log.warning("Не удалось прочитать лист «%s»", title, exc_info=True)
-            return None
-
-    async def delete_big_purchase(self, op_id: str) -> None:
-        async with self._lock:
-            _, row = await self._run(self._big_row, op_id)
-            if row:
-                await self._run(self._ws(SHEET_BIG).delete_rows, row)
-
-    async def set_big_purchase_category(self, op_id: str, category: str) -> None:
-        async with self._lock:
-            lay, row = await self._run(self._big_row, op_id)
-            if row:
-                await self._run(
-                    self._ws(SHEET_BIG).update, [[text_for_sheet(category)]],
-                    f"{_col_letter(lay.cat_col)}{row}", value_input_option="USER_ENTERED",
-                )
 
     # ----- поездки -----
 

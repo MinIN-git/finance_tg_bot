@@ -66,14 +66,6 @@ def test_tags():
     assert r.comment == "отель"
 
 
-def test_account():
-    assert p("2000 продукты @наличные").account == "Наличные"
-    assert p("2000 продукты @тинь").account == "Тинькофф Black"
-    assert p("2000 продукты").account is None
-    with pytest.raises(ParseError):
-        p("2000 продукты @сбер")
-
-
 def test_transfer():
     r = p("50000 Карта -> Вклад")
     assert r.type == OpType.TRANSFER

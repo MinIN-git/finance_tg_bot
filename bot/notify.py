@@ -42,7 +42,9 @@ async def send_month_close(bot: Bot, chat_id: int, svc: FinanceService) -> None:
 
 
 async def send_idle_reminder(bot: Bot, chat_ids, svc: FinanceService, now: datetime | None = None) -> bool:
-    """«Ничего не записано 3 дня» — один раз за перерыв. True — напоминание отправлено."""
+    """«Ничего не записано 3 дня» — один раз за перерыв, если сигналы включены. True — отправлено."""
+    if not svc.state.get("signals_enabled", True):
+        return False
     now = now or datetime.now(svc.tz)
     last = await svc.last_activity()
     if last is None or now - last < timedelta(days=IDLE_DAYS):

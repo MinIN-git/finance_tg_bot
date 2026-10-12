@@ -18,7 +18,6 @@ def test_date_helpers():
     assert reports.month_end(date(2026, 12, 5)) == date(2026, 12, 31)
     assert reports.add_months(date(2026, 1, 15), -1) == date(2025, 12, 1)
     assert reports.add_months(date(2026, 11, 30), 2) == date(2027, 1, 1)
-    assert reports.week_start(date(2026, 10, 4)) == date(2026, 9, 28)  # воскресенье -> понедельник
 
 
 def test_summarize_basic():

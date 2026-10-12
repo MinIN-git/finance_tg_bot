@@ -213,15 +213,10 @@ def test_empty_id_never_matches(storage):
 def test_batch_add_and_delete(storage):
     ops = [Operation(date(2026, 9, 30), OpType.EXPENSE, Decimal(i + 1), "Досуг", "Карта", tags=["импорт"]) for i in range(5)]
     run(storage.add_operations(ops))
-    assert run(storage.delete_operations([ops[1].id, ops[3].id])) == 2
+    for o in (ops[1], ops[3]):
+        assert run(storage.delete_operation(o.id)).id == o.id
     storage._ops = None
     assert [o.amount for o in run(storage.list_operations())] == [1, 3, 5]
-
-
-def test_read_grid(storage):
-    storage._sh.sheets["Лист1"].rows = [["Сентябрь", ""], ["Доходы", "Сумма"]]
-    formatted, raw = storage.read_grid("Лист1")
-    assert formatted[1] == ["Доходы", "Сумма"]
 
 
 def test_emoji_column_added_to_old_categories_sheet(monkeypatch):
@@ -245,37 +240,6 @@ def test_emoji_column_added_to_old_categories_sheet(monkeypatch):
     assert old.rows[1][3] == "☕"
 
 
-def test_big_purchases_columns_and_rows(storage):
-    ws = storage._sh.add_worksheet("Большие покупки", 100, 5)
-    ws.rows = [["Дата", "Что купил", "Стоимость", "Категория", "id"]]
-    storage._worksheets = {}
-    assert ws.rows[0] == ["Дата", "Что купил", "Стоимость", "Категория", "id"]
-    run(storage.add_big_purchase(st.BigPurchase(date(2026, 9, 3), "отпуск турция", Decimal(283122), "Досуг", "op1")))
-    run(storage.add_big_purchase(st.BigPurchase(date(2026, 9, 4), "диван", Decimal(50000), "", "op2")))
-    got = run(storage.list_big_purchases())
-    assert [(b.what, b.category, b.op_id) for b in got] == [("отпуск турция", "Досуг", "op1"), ("диван", "", "op2")]
-    run(storage.set_big_purchase_category("op2", "Прочее"))
-    run(storage.delete_big_purchase("op1"))
-    assert [(b.what, b.category) for b in run(storage.list_big_purchases())] == [("диван", "Прочее")]
-
-
-def test_old_big_sheet_gets_category_column(monkeypatch):
-    import gspread
-
-    client = FakeClient()
-    old = client.sh.add_worksheet("Большие покупки", 100, 3)
-    old.rows = [["Мои крупные траты", "", ""], ["Дата", "Что купил", "Стоимость"], [46280, "Отпуск в Турцию", 283122]]
-    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
-    s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
-    s.ensure_sheets()
-    assert old.rows[1] == ["Дата", "Что купил", "Стоимость"]     # бот лист больше не трогает
-    s.ensure_big_columns()                                       # только скрипт миграции
-    assert old.rows[1] == ["Дата", "Что купил", "Стоимость", "Категория", "id"]
-    old.rows[2] += ["Досуг"]                          # Иван вписал категорию
-    [b] = run(s.list_big_purchases())
-    assert (b.what, b.category, b.amount) == ("Отпуск в Турцию", "Досуг", 283122)
-
-
 def test_old_operations_sheet_gets_kind_column(monkeypatch):
     import gspread
 
@@ -294,25 +258,6 @@ def test_old_operations_sheet_gets_kind_column(monkeypatch):
     ops[1] = Operation(**{**ops[1].__dict__, "kind": st.Kind.TRIP, "trip_item": ""})
     run(s.update_operation(ops[1]))
     assert old.rows[2][9:11] == ["командировка", "Прочее"]
-
-
-def test_link_big_purchase_and_read_sheet(monkeypatch):
-    import gspread
-
-    client = FakeClient()
-    big = client.sh.add_worksheet("Большие покупки", 100, 3)
-    big.rows = [["Дата", "Что купил", "Стоимость"], [46271, "Отпуск в Турцию", 283122], [46250, "Кольцо", 77960]]
-    client.sh.add_worksheet("Командировки", 10, 3).rows = [["13.06.2026 – 16.06.2026", ""], ["Кафешки", 100]]
-    monkeypatch.setattr(gspread, "service_account", lambda filename: client)
-    s = st.SheetsStorage("key.json", "sheet-id", cache_ttl=0)
-    s.ensure_sheets()
-    item = run(s.list_big_purchases())[0]
-    assert run(s.link_big_purchase(item, "op9", "Досуг"))
-    assert big.rows[1][3:5] == ["Досуг", "op9"] and big.rows[2][3:5] in ([], ["", ""])
-    assert not run(s.link_big_purchase(item, "op9", "Досуг"))       # уже связана — второй раз не трогает
-    formatted, raw = run(s.read_sheet("Командировки"))
-    assert formatted[1] == ["Кафешки", "100"] or formatted[1][0] == "Кафешки"
-    assert run(s.read_sheet("Нет такого")) is None
 
 
 class _Resp:

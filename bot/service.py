@@ -306,11 +306,6 @@ class FinanceService:
             return "\n".join(lines)
         return self._now_text(reports.month_now_title(today), ops, first, today)
 
-    async def week_text(self) -> str:
-        today = self.today()
-        start = reports.week_start(today)
-        return self._now_text(reports.week_title(start, today), await self._data(), start, today)
-
     async def category_text(self, query: str) -> str:
         cats = find_category(query, await self._categories())
         names = list(dict.fromkeys(c.name for c in cats))
@@ -321,6 +316,15 @@ class FinanceService:
         ops = await self._data()
         icon = next((c.emoji for c in cats if c.name == names[0] and c.emoji), "")
         return reports.format_category_report(names[0], ops, self.today(), self.cur, icon=icon)
+
+    async def category_text_for(self, op_id: str) -> str | None:
+        """Сводка категории записанной операции (кнопка «📊» под записью); None — операции уже нет."""
+        op = await self.get_operation(op_id)
+        if op is None or op.type == OpType.TRANSFER:
+            return None
+        ops = await self._data()
+        icon = self._icons.get((op.type, op.category), "")
+        return reports.format_category_report(op.category, ops, self.today(), self.cur, icon=icon, op_type=op.type)
 
     async def month_close(self, month: date | None = None) -> reports.MonthClose:
         month = reports.month_start(month or reports.add_months(self.today(), -1))
@@ -377,28 +381,6 @@ class FinanceService:
     async def signals(self) -> list[tuple[str, str]]:
         ops = await self._data()
         return reports.find_signals(ops, await self.storage.list_balances(), self.today(), self.cur, self._icons)
-
-    async def compare_text(self, args: str | None) -> str:
-        from .import_budget import parse_month_label
-
-        today = self.today()
-        if not args:
-            m2 = reports.add_months(today, -1)
-            m1 = reports.add_months(today, -2)
-        else:
-            labels: list[str] = []
-            for t in args.split():   # «сентябрь 2025» — год приклеивается к месяцу
-                if labels and t.isdigit() and len(t) == 4:
-                    labels[-1] += f" {t}"
-                else:
-                    labels.append(t)
-            months = [parse_month_label(lbl, today) for lbl in labels]
-            if len(months) != 2 or None in months:
-                return ("Укажите два месяца: <code>/compare август сентябрь</code> "
-                        "или <code>/compare 08.2026 09.2026</code>")
-            m1, m2 = months
-        ops = await self._data()
-        return reports.format_compare(ops, m1, m2, self.cur, self._icons)
 
     async def big_text(self) -> str:
         ops = await self._data()

@@ -48,10 +48,6 @@ def shift_months(d: date, n: int) -> date:
     return first.replace(day=min(d.day, month_end(first).day))
 
 
-def week_start(d: date) -> date:
-    return d - timedelta(days=d.weekday())
-
-
 def period_title(first: date, last: date) -> str:
     """«Июль – сентябрь» (год — если месяцы в разных годах или не текущий)."""
     a, b = MONTHS_NOMINATIVE[first.month - 1], MONTHS_NOMINATIVE[last.month - 1]
@@ -337,10 +333,6 @@ def format_now(
 
 def month_now_title(today: date) -> str:
     return f"📅 <b>{MONTHS_NOMINATIVE[today.month - 1].capitalize()}</b>, {today.day}-й день"
-
-
-def week_title(start: date, end: date) -> str:
-    return f"🗓 <b>Неделя</b> {fmt_short_date(start)}–{fmt_short_date(end)}"
 
 
 def format_all_categories(title: str, s: Summary, cur: str = "", icons: Icons | None = None) -> str:
@@ -758,9 +750,11 @@ def format_category_report(
     cur: str = "",
     max_items: int = 20,
     icon: str = "",
+    op_type: OpType | None = None,
 ) -> str:
     first = month_start(today)
-    in_cat = [op for op in ops if op.category == name and op.type != OpType.TRANSFER]
+    in_cat = [op for op in ops if op.category == name and op.type != OpType.TRANSFER
+              and (op_type is None or op.type == op_type)]
     current = sorted((op for op in in_cat if first <= op.date <= today), key=lambda o: o.date, reverse=True)
     total = sum((op.amount for op in current), ZERO)
     head = f"{icon} " if icon else "🏷 "
@@ -777,36 +771,6 @@ def format_category_report(
         for m, v in zip(u.months, u.history.get(name, [ZERO] * len(u.months))):
             lines.append(f"{MONTHS_SHORT[m.month - 1]} {m.year}: {fmt_money(v, cur)}")
         lines.append(f"Обычно (медиана): <b>{fmt_money(u.by_category.get(name, ZERO), cur)}</b> в месяц")
-    return "\n".join(lines)
-
-
-# ---------- сравнение двух месяцев (/compare) ----------
-
-def format_compare(ops: Sequence[Operation], m1: date, m2: date, cur: str = "", icons: Icons | None = None) -> str:
-    """Два месяца рядом (обычные траты); ▲/▼ у второго месяца — по правилу «обычно»."""
-    a, b = summarize_clean_month(ops, m1), summarize_clean_month(ops, m2)
-    u = usual(ops, m2)
-    lines = [
-        f"⚖️ <b>{month_title(m1).capitalize()} → {month_title(m2)}</b>, обычные траты", "",
-        f"💰 Доход {fmt_money(a.income, cur)} → <b>{fmt_money(b.income, cur)}</b>",
-        f"💸 Расход {fmt_money(a.expense, cur)} → <b>{fmt_money(b.expense, cur)}</b>",
-        f"{'🟢' if b.balance >= 0 else '🔴'} Итог {fmt_money(a.balance, cur, signed=True)} → "
-        f"<b>{fmt_money(b.balance, cur, signed=True)}</b>",
-    ]
-    for title, op_type, xs, ys in (
-        ("💸 Расходы", OpType.EXPENSE, dict(a.expense_by_category), dict(b.expense_by_category)),
-        ("💰 Доходы", OpType.INCOME, dict(a.income_by_category), dict(b.income_by_category)),
-    ):
-        names = sorted(set(xs) | set(ys), key=lambda n: (-max(xs.get(n, ZERO), ys.get(n, ZERO)), n))
-        if not names:
-            continue
-        lines += ["", f"<b>{title}</b>"]
-        for n in names:
-            x, y = xs.get(n, ZERO), ys.get(n, ZERO)
-            mark = u.marker(n, y) if op_type == OpType.EXPENSE else ""
-            lines.append(f"{_label(icons, op_type, n)}: {fmt_money(x, cur)} → {fmt_money(y, cur)} {mark}".rstrip())
-    if not (a.count or b.count):
-        lines += ["", "За эти месяцы записей нет."]
     return "\n".join(lines)
 
 
